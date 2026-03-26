@@ -107,7 +107,7 @@ describe('receiver handler', () => {
   it('GET /health returns 200 + status ok', async () => {
     const result = await handler(makeEvent({ method: 'GET', path: '/health' }));
     expect(result.statusCode).toBe(200);
-    const body = JSON.parse(result.body as string);
+    const body = JSON.parse(result.body ?? '');
     expect(body.status).toBe('ok');
   });
 
@@ -188,7 +188,7 @@ describe('receiver handler', () => {
     }));
 
     expect(result.statusCode).toBe(200);
-    const body = JSON.parse(result.body as string);
+    const body = JSON.parse(result.body ?? '');
     expect(body.success).toBe(true);
     expect(mockSetCredentials).toHaveBeenCalledWith('+14155551234', {
       resyAuthToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9',

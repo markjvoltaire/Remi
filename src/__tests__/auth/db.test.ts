@@ -168,6 +168,7 @@ describe('challenge', () => {
     challengeId: 'ch_123',
     mobileNumber: phone,
     firstName: 'Alice',
+    isNewUser: false,
     requiredFields: [{ name: 'em_address', type: 'email', message: 'Enter email' }],
   };
 

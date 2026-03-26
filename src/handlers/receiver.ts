@@ -11,7 +11,7 @@
  * triggered by SQS.
  */
 
-import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
+import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import {
   isMessageReceivedEvent,
@@ -34,7 +34,7 @@ const botNumbers = process.env.LINQ_AGENT_BOT_NUMBERS?.split(',').map(p => p.tri
 const ignoredSenders = process.env.IGNORED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
 const allowedSenders = process.env.ALLOWED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
 
-export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
   const method = event.requestContext.http.method;
   const path = event.rawPath;
 
@@ -65,7 +65,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
 // ── Webhook handler (validate + SQS enqueue) ────────────────────────────
 
-async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
   if (!event.body) return json(400, { error: 'Missing body' });
 
   let webhookEvent: WebhookEvent;
@@ -126,7 +126,7 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
 
 // ── Auth setup page ─────────────────────────────────────────────────────
 
-async function handleAuthSetupPage(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+async function handleAuthSetupPage(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
   const token = event.queryStringParameters?.token;
   if (!token) {
     return html(400, errorPage('Missing token', 'This link is invalid. Text the agent for a new one.'));
@@ -143,7 +143,7 @@ async function handleAuthSetupPage(event: APIGatewayProxyEventV2): Promise<APIGa
 
 // ── Auth submit ─────────────────────────────────────────────────────────
 
-async function handleAuthSubmit(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+async function handleAuthSubmit(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
   if (!event.body) return json(400, { error: 'Missing body' });
 
   let body: { token?: string; resyAuthToken?: string };
@@ -190,7 +190,7 @@ async function handleAuthSubmit(event: APIGatewayProxyEventV2): Promise<APIGatew
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
+function json(statusCode: number, body: unknown): APIGatewayProxyStructuredResultV2 {
   return {
     statusCode,
     headers: {
@@ -202,7 +202,7 @@ function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
   };
 }
 
-function html(statusCode: number, body: string): APIGatewayProxyResultV2 {
+function html(statusCode: number, body: string): APIGatewayProxyStructuredResultV2 {
   return {
     statusCode,
     headers: {

@@ -150,6 +150,7 @@ app.post(
             challengeId: pendingChallenge.challengeId,
             mobileNumber: pendingChallenge.mobileNumber,
             firstName: pendingChallenge.firstName,
+            isNewUser: pendingChallenge.isNewUser,
             requiredFields: pendingChallenge.requiredFields,
           },
           fieldValues,
@@ -207,6 +208,13 @@ app.post(
           return;
         }
 
+        if (!('challenge' in result)) {
+          // Server error (5xx) or unexpected shape
+          await sendMessage(chatId, `resy is having trouble verifying codes right now — try again in a minute`);
+          console.log(`[main] OTP verification returned server error`);
+          return;
+        }
+
         // Challenge — need email verification
         const challenge = result.challenge;
         await clearPendingOTP(from);
@@ -216,6 +224,7 @@ app.post(
           challengeId: challenge.challengeId,
           mobileNumber: challenge.mobileNumber,
           firstName: challenge.firstName,
+          isNewUser: challenge.isNewUser,
           requiredFields: challenge.requiredFields,
         });
 
