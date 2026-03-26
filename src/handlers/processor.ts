@@ -67,14 +67,25 @@ export const handler: SQSHandler = async (event) => {
 
 async function processRecord(record: SQSRecord): Promise<void> {
   const webhookEvent = JSON.parse(record.body) as MessageReceivedEvent;
-  const { chat_id: chatId, from, message, service } = webhookEvent.data;
-  const messageId = message.id;
+  const data = webhookEvent.data as any;
 
-  const text = extractTextContent(message.parts);
-  const images = extractImageUrls(message.parts);
-  const audio = extractAudioUrls(message.parts);
-  const incomingEffect = message.effect;
-  const incomingReplyTo = message.reply_to;
+  const chatId: string | undefined = data.chat_id ?? data.chat?.id;
+  const from: string | undefined = data.from ?? data.sender_handle?.handle;
+  const messageId: string | undefined = data.message?.id ?? data.id;
+  const service = data.service;
+  const parts = (data.message?.parts ?? data.parts) as unknown;
+  const incomingEffect = (data.message?.effect ?? data.effect) ?? undefined;
+  const incomingReplyTo = (data.message?.reply_to ?? data.reply_to) ?? undefined;
+
+  if (!chatId || !from || !messageId || !Array.isArray(parts)) {
+    console.error(`[processor] Unexpected message.received payload shape (missing required fields)`);
+    return;
+  }
+
+  const typedParts = parts as any[];
+  const text = extractTextContent(typedParts as any);
+  const images = extractImageUrls(typedParts as any);
+  const audio = extractAudioUrls(typedParts as any);
 
   const start = Date.now();
   console.log(`[processor] Processing message from ${redactPhone(from)}`);

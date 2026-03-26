@@ -16,7 +16,14 @@ export interface MessageReceivedEvent extends WebhookEvent {
   data: MessageReceivedData;
 }
 
-export interface MessageReceivedData {
+/**
+ * Linq webhook payloads have evolved over time. This project supports both:
+ * - Legacy shape (chat_id/from/recipient_phone/message)
+ * - Current shape (chat/id, sender_handle/owner_handle, parts at root)
+ */
+export type MessageReceivedData = MessageReceivedDataLegacy | MessageReceivedDataCurrent;
+
+export interface MessageReceivedDataLegacy {
   chat_id: string;
   from: string;
   recipient_phone: string;
@@ -24,6 +31,36 @@ export interface MessageReceivedData {
   is_from_me: boolean;
   service: 'iMessage' | 'SMS' | 'RCS';
   message: IncomingMessage;
+}
+
+export interface MessageHandle {
+  handle: string;
+  id: string;
+  is_me: boolean;
+  joined_at: string;
+  left_at: string | null;
+  service: 'iMessage' | 'SMS' | 'RCS';
+  status: string;
+}
+
+export interface MessageChat {
+  id: string;
+  is_group: boolean;
+  owner_handle: MessageHandle;
+}
+
+export interface MessageReceivedDataCurrent {
+  chat: MessageChat;
+  direction: 'inbound' | 'outbound';
+  id: string;
+  parts: MessagePart[];
+  sender_handle: MessageHandle;
+  service: 'iMessage' | 'SMS' | 'RCS';
+  sent_at: string;
+  effect: MessageEffect | null;
+  reply_to: ReplyTo | null;
+  delivered_at: string | null;
+  read_at: string | null;
 }
 
 export interface IncomingMessage {

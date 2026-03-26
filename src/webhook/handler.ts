@@ -42,16 +42,33 @@ export function createWebhookHandler(onMessage: MessageHandler) {
         console.log(`[webhook] Full payload:`, JSON.stringify(event, null, 2));
       }
 
-      const { chat_id, from, recipient_phone, message, service } = event.data;
+      const data = event.data as any;
+
+      // Support both legacy + current Linq payload shapes
+      const chatId: string | undefined = data.chat_id ?? data.chat?.id;
+      const from: string | undefined = data.from ?? data.sender_handle?.handle;
+      const recipientPhone: string | undefined = data.recipient_phone ?? data.chat?.owner_handle?.handle;
+      const isFromMe: boolean = Boolean(data.is_from_me ?? data.sender_handle?.is_me);
+      const service: MessageService | undefined = data.service;
+
+      const messageId: string | undefined = data.message?.id ?? data.id;
+      const parts = (data.message?.parts ?? data.parts) as unknown;
+      const incomingEffect = (data.message?.effect ?? data.effect) as MessageEffect | undefined | null;
+      const incomingReplyTo = (data.message?.reply_to ?? data.reply_to) as ReplyTo | undefined | null;
+
+      if (!chatId || !from || !recipientPhone || !messageId || !Array.isArray(parts)) {
+        console.error(`[webhook] Unexpected message.received payload shape (missing required fields)`);
+        return;
+      }
 
       // Only process messages sent to this bot's phone numbers
-      if (botNumbers.length > 0 && !botNumbers.includes(recipient_phone)) {
-        console.log(`[webhook] Skipping message to ${redactPhone(recipient_phone)} (not this bot's number)`);
+      if (botNumbers.length > 0 && !botNumbers.includes(recipientPhone)) {
+        console.log(`[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot's number)`);
         return;
       }
 
       // Skip messages from ourselves
-      if (event.data.is_from_me) {
+      if (isFromMe) {
         console.log(`[webhook] Skipping own message`);
         return;
       }
@@ -68,11 +85,10 @@ export function createWebhookHandler(onMessage: MessageHandler) {
         return;
       }
 
-      const text = extractTextContent(message.parts);
-      const images = extractImageUrls(message.parts);
-      const audio = extractAudioUrls(message.parts);
-      const incomingEffect = message.effect;
-      const incomingReplyTo = message.reply_to;
+      const typedParts = parts as any[];
+      const text = extractTextContent(typedParts as any);
+      const images = extractImageUrls(typedParts as any);
+      const audio = extractAudioUrls(typedParts as any);
 
       if (!text.trim() && images.length === 0 && audio.length === 0) {
         console.log(`[webhook] Skipping empty message`);
@@ -88,7 +104,7 @@ export function createWebhookHandler(onMessage: MessageHandler) {
       console.log(`[webhook] Message from ${redactPhone(from)}: "${text.substring(0, 50)}..."${mediaInfo ? ` [${mediaInfo}]` : ''}${effectInfo}${replyInfo}`);
 
       try {
-        await onMessage(chat_id, from, text, message.id, images, audio, incomingEffect, incomingReplyTo, service);
+        await onMessage(chatId, from, text, messageId, images, audio, incomingEffect ?? undefined, incomingReplyTo ?? undefined, service);
       } catch (error) {
         console.error(`[webhook] Error handling message:`, error);
       }

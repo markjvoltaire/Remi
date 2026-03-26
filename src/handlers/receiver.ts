@@ -83,14 +83,26 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
     return json(200, { received: true });
   }
 
-  const { chat_id, from, recipient_phone, message, is_from_me } = webhookEvent.data;
+  const data = webhookEvent.data as any;
 
-  // Filter checks (same logic as webhook/handler.ts)
-  if (botNumbers.length > 0 && !botNumbers.includes(recipient_phone)) {
-    console.log(`[webhook] Skipping message to ${redactPhone(recipient_phone)} (not this bot's number)`);
+  const chatId: string | undefined = data.chat_id ?? data.chat?.id;
+  const from: string | undefined = data.from ?? data.sender_handle?.handle;
+  const recipientPhone: string | undefined = data.recipient_phone ?? data.chat?.owner_handle?.handle;
+  const isFromMe: boolean = Boolean(data.is_from_me ?? data.sender_handle?.is_me);
+  const messageId: string | undefined = data.message?.id ?? data.id;
+  const parts = (data.message?.parts ?? data.parts) as unknown;
+
+  if (!chatId || !from || !recipientPhone || !messageId || !Array.isArray(parts)) {
+    console.error(`[webhook] Unexpected message.received payload shape (missing required fields)`);
     return json(200, { received: true });
   }
-  if (is_from_me) {
+
+  // Filter checks (same logic as webhook/handler.ts)
+  if (botNumbers.length > 0 && !botNumbers.includes(recipientPhone)) {
+    console.log(`[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot's number)`);
+    return json(200, { received: true });
+  }
+  if (isFromMe) {
     console.log(`[webhook] Skipping own message`);
     return json(200, { received: true });
   }
@@ -103,9 +115,10 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
     return json(200, { received: true });
   }
 
-  const text = extractTextContent(message.parts);
-  const images = extractImageUrls(message.parts);
-  const audio = extractAudioUrls(message.parts);
+  const typedParts = parts as any[];
+  const text = extractTextContent(typedParts as any);
+  const images = extractImageUrls(typedParts as any);
+  const audio = extractAudioUrls(typedParts as any);
 
   if (!text.trim() && images.length === 0 && audio.length === 0) {
     console.log(`[webhook] Skipping empty message`);
@@ -116,7 +129,7 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
   await sqs.send(new SendMessageCommand({
     QueueUrl: QUEUE_URL,
     MessageBody: JSON.stringify(webhookEvent),
-    MessageGroupId: chat_id, // FIFO: serialize per chat
+    MessageGroupId: chatId, // FIFO: serialize per chat
     MessageDeduplicationId: webhookEvent.event_id,
   }));
 
