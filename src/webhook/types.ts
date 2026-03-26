@@ -23,6 +23,12 @@ export interface MessageReceivedEvent extends WebhookEvent {
   is_group: boolean;
 }
 
+export interface MessageReadEvent extends WebhookEvent {
+  event: 'message.read';
+  message_id: string;
+  read_at: number;
+}
+
 export interface TextPart {
   type: 'text';
   value: string;
@@ -48,6 +54,10 @@ export interface ReplyTo {
 
 export function isMessageReceivedEvent(event: WebhookEvent): event is MessageReceivedEvent {
   return event.event === 'message.received';
+}
+
+export function isMessageReadEvent(event: WebhookEvent): event is MessageReadEvent {
+  return event.event === 'message.read';
 }
 
 export function extractTextContent(parts: MessagePart[]): string {

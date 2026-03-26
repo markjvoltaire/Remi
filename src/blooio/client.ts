@@ -123,7 +123,26 @@ export async function getChat(chatId: string): Promise<ChatInfo> {
 export async function renameGroupChat(_chatId: string, _displayName: string): Promise<void> {}
 export async function setGroupChatIcon(_chatId: string, _iconUrl: string): Promise<void> {}
 export async function shareContactCard(_chatId: string): Promise<void> {}
-export async function markAsRead(_chatId: string): Promise<void> {}
+export async function markAsRead(chatId: string): Promise<void> {
+  if (!API_KEY) {
+    throw new Error('BLOOIO_API_KEY not configured');
+  }
+
+  const encodedChatId = encodeURIComponent(chatId);
+  const url = `${BASE_URL}/chats/${encodedChatId}/read`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${API_KEY}`,
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Blooio API error: ${response.status} ${truncateError(errorText)}`);
+  }
+}
 export async function startTyping(_chatId: string): Promise<void> {}
 export async function stopTyping(_chatId: string): Promise<void> {}
 export async function sendReaction(

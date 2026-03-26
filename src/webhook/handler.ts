@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import {
   WebhookEvent,
   isMessageReceivedEvent,
+  isMessageReadEvent,
   ExtractedMedia,
   MessageEffect,
   ReplyTo,
@@ -114,6 +115,13 @@ export function createWebhookHandler(onMessage: MessageHandler) {
       } catch (error) {
         console.error(`[webhook] Error handling message:`, error);
       }
+    }
+
+    if (isMessageReadEvent(event)) {
+      const chatId = event.external_id ?? 'unknown-chat';
+      const messageId = event.message_id ?? 'unknown-message';
+      const readAt = event.read_at ? new Date(event.read_at).toISOString() : 'unknown-time';
+      console.log(`[webhook] Read receipt: chat=${chatId} message=${messageId} at=${readAt}`);
     }
   };
 }

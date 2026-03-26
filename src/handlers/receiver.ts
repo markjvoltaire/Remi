@@ -15,6 +15,7 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from '
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import {
   isMessageReceivedEvent,
+  isMessageReadEvent,
 } from '../webhook/types.js';
 import type { WebhookEvent } from '../webhook/types.js';
 import { verifyAuthToken, getAuthTokenChatId } from '../auth/db.js';
@@ -81,6 +82,12 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
 
   // Only process message.received events
   if (!isMessageReceivedEvent(webhookEvent)) {
+    if (isMessageReadEvent(webhookEvent)) {
+      const chatId = webhookEvent.external_id ?? 'unknown-chat';
+      const messageId = webhookEvent.message_id ?? 'unknown-message';
+      const readAt = webhookEvent.read_at ? new Date(webhookEvent.read_at).toISOString() : 'unknown-time';
+      console.log(`[webhook] Read receipt: chat=${chatId} message=${messageId} at=${readAt}`);
+    }
     return json(200, { received: true });
   }
 

@@ -104,25 +104,17 @@ import { handler } from '../../handlers/processor.js';
 
 function makeSQSEvent(text: string, overrides: Record<string, unknown> = {}): SQSEvent {
   const webhookEvent = {
-    api_version: 'v3',
-    event_id: 'evt_1',
-    created_at: new Date().toISOString(),
-    trace_id: 'tr_1',
-    partner_id: 'p_1',
-    event_type: 'message.received',
-    data: {
-      chat_id: 'chat_1',
-      from: '+14155551234',
-      recipient_phone: '+14155550000',
-      received_at: new Date().toISOString(),
-      is_from_me: false,
-      service: 'iMessage',
-      message: {
-        id: 'msg_1',
-        parts: [{ type: 'text', value: text }],
-      },
-      ...overrides,
-    },
+    event: 'message.received',
+    message_id: 'msg_1',
+    sender: '+14155551234',
+    external_id: 'chat_1',
+    internal_id: '+14155550000',
+    protocol: 'imessage',
+    text,
+    received_at: Date.now(),
+    attachments: [],
+    is_group: false,
+    ...overrides,
   };
 
   const record: SQSRecord = {
