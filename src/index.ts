@@ -358,6 +358,12 @@ app.post(
       console.log(`[main] Claude saved user info without text response (no auto-ack)`);
     }
 
+    // Avoid silent no-op: if Claude produced no text/effect/reaction, send a small fallback
+    if (!finalText && !reaction) {
+      finalText = `hey — i’m here. what are you trying to book? (city, date, party size)`;
+      console.log(`[main] Claude returned no text/reaction; sending fallback`);
+    }
+
     if (finalText) {
       // Split into multiple messages first, then clean each one
       // (must split before cleaning, or the --- delimiter gets mangled)
@@ -372,7 +378,8 @@ app.post(
           const messageEffect = isLastMessage ? effect ?? undefined : undefined;
           const messageReplyTo = (i === 0) ? replyTo : undefined;
 
-          await sendMessage(chatId, messages[i], messageEffect, messageReplyTo);
+          const sent = await sendMessage(chatId, messages[i], messageEffect, messageReplyTo);
+          console.log(`[linq] delivery_status=${sent.message.delivery_status}`);
 
           // Add a natural delay between messages (except after the last one)
           if (!isLastMessage) {
