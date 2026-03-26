@@ -113,15 +113,15 @@ All credentials are encrypted (AES-256-GCM) and stored per-user.
 
 ## Resy Tools
 
-| Tool | Description |
-|------|-------------|
-| `resy_search` | Search restaurants by keyword and location |
-| `resy_find_slots` | Find available time slots for a venue/date/party size |
-| `resy_book` | Book a reservation using a config token |
-| `resy_cancel` | Cancel a reservation using a resy token |
-| `resy_reservations` | List upcoming reservations |
-| `resy_profile` | Get user's Resy profile (name, email, member info) |
-| `resy_sign_out` | Disconnect Resy account and clear credentials |
+| Tool                | Description                                           |
+| ------------------- | ----------------------------------------------------- |
+| `resy_search`       | Search restaurants by keyword and location            |
+| `resy_find_slots`   | Find available time slots for a venue/date/party size |
+| `resy_book`         | Book a reservation using a config token               |
+| `resy_cancel`       | Cancel a reservation using a resy token               |
+| `resy_reservations` | List upcoming reservations                            |
+| `resy_profile`      | Get user's Resy profile (name, email, member info)    |
+| `resy_sign_out`     | Disconnect Resy account and clear credentials         |
 
 ## Deployment
 
@@ -159,3 +159,5 @@ Also supports Railway, Fly.io, and Heroku (`Procfile` included).
 ## License
 
 MIT
+
+hello
