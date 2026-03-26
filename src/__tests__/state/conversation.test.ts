@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// In-memory store mock for DynamoDB
+// In-memory store mock for storage backend
 const store = new Map<string, unknown>();
-vi.mock('../../db/dynamodb.js', () => ({
+vi.mock('../../db/storage.js', () => ({
   getItem: vi.fn(async (pk: string, sk: string) => store.get(`${pk}||${sk}`) ?? null),
   putItem: vi.fn(async (pk: string, sk: string, data: Record<string, unknown>) => {
     store.set(`${pk}||${sk}`, { ...data });

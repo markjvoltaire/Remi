@@ -1,7 +1,7 @@
 import type { User, BookingsCredentials, AuthToken } from './types.js';
 import { encrypt, decrypt } from './encryption.js';
 import { redactPhone } from '../utils/redact.js';
-import { getItem, putItem, deleteItem, updateItem } from '../db/dynamodb.js';
+import { getItem, putItem, deleteItem, updateItem } from '../db/storage.js';
 
 // DynamoDB key prefixes (single-table design)
 const USER_PK = (phone: string) => `USER#${phone}`;

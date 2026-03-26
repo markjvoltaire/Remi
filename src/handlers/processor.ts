@@ -29,7 +29,7 @@ import {
 } from '../auth/index.js';
 import { sendResyOTP, verifyResyOTP, completeResyChallenge, registerResyUser } from '../bookings/index.js';
 import { redactPhone } from '../utils/redact.js';
-import { getItem, putItem } from '../db/dynamodb.js';
+import { getItem, putItem } from '../db/storage.js';
 
 const CONTACT_CARD_INTERVAL = 5;
 

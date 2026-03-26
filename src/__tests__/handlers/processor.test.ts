@@ -92,10 +92,10 @@ vi.mock('../../bookings/index.js', () => ({
   completeResyChallenge: (...args: unknown[]) => mockCompleteResyChallenge(...args),
 }));
 
-// Mock DynamoDB getItem/putItem for chat count
+// Mock storage getItem/putItem for chat count
 const mockDbGetItem = vi.fn().mockResolvedValue(null);
 const mockDbPutItem = vi.fn().mockResolvedValue(undefined);
-vi.mock('../../db/dynamodb.js', () => ({
+vi.mock('../../db/storage.js', () => ({
   getItem: (...args: unknown[]) => mockDbGetItem(...args),
   putItem: (...args: unknown[]) => mockDbPutItem(...args),
 }));

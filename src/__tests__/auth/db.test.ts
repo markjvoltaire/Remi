@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock the DynamoDB wrapper
+// Mock the storage backend used by auth/db.ts
 const store = new Map<string, unknown>();
-vi.mock('../../db/dynamodb.js', () => ({
+vi.mock('../../db/storage.js', () => ({
   getItem: vi.fn(async (pk: string, sk: string) => store.get(`${pk}||${sk}`) ?? null),
   putItem: vi.fn(async (pk: string, sk: string, data: Record<string, unknown>) => {
     store.set(`${pk}||${sk}`, { ...data });

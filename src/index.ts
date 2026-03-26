@@ -8,7 +8,7 @@ import { getUserProfile, addMessage } from './state/conversation.js';
 import { authRoutes, getUser, createUser, loadUserContext, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, setCredentials, clearSignedOut } from './auth/index.js';
 import { sendResyOTP, verifyResyOTP, completeResyChallenge } from './bookings/index.js';
 import { redactPhone } from './utils/redact.js';
-import { putItem } from './db/dynamodb.js';
+import { putItem } from './db/storage.js';
 
 // Clean up LLM response formatting quirks before sending
 function cleanResponse(text: string): string {
@@ -32,7 +32,7 @@ function cleanResponse(text: string): string {
 const CONTACT_CARD_INTERVAL = 5; // Share every N messages
 
 async function getChatMessageCount(chatId: string): Promise<number> {
-  const { getItem } = await import('./db/dynamodb.js');
+  const { getItem } = await import('./db/storage.js');
   const record = await getItem<{ count: number }>(`CHATCOUNT#${chatId}`, 'CHATCOUNT');
   return record?.count ?? 0;
 }

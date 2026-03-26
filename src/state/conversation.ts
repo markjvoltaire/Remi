@@ -1,7 +1,7 @@
 // Conversation and user profile storage backed by DynamoDB.
 // Conversations expire after 24 hours (via DynamoDB TTL). User profiles persist.
 
-import { getItem, putItem, deleteItem } from '../db/dynamodb.js';
+import { getItem, putItem, deleteItem } from '../db/storage.js';
 
 const CONVERSATION_TTL_S = 24 * 60 * 60; // 24 hours
 const MAX_MESSAGES = 50;

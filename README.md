@@ -51,6 +51,17 @@ Edit `.env` and fill in your keys. For `RESY_AUTH_TOKEN`:
 3. Click around to trigger any API request to `api.resy.com`
 4. Copy the `x-resy-auth-token` header value
 
+### Storage (Supabase)
+
+The agent stores users, credentials, onboarding state, and conversation history in Supabase (recommended).
+
+1. Create a Supabase project.
+2. Run the SQL migration in your Supabase SQL editor: `supabase/migrations/0001_init.sql`.
+3. Set these environment variables in `.env`:
+   - `STORAGE_PROVIDER=supabase`
+   - `SUPABASE_URL=...`
+   - `SUPABASE_SERVICE_ROLE_KEY=...` (server-side only; do not expose to clients)
+
 ### Run
 
 ```bash
@@ -113,6 +124,22 @@ All credentials are encrypted (AES-256-GCM) and stored per-user.
 | `resy_sign_out` | Disconnect Resy account and clear credentials |
 
 ## Deployment
+
+### Single-node server (Supabase)
+
+This project runs in “single node” mode when you do **not** set `AWS_LAMBDA_FUNCTION_NAME` (it starts the Express listener directly).
+
+1. Run migrations in your Supabase project (see `supabase/migrations/0001_init.sql`).
+2. Set environment variables:
+   - `STORAGE_PROVIDER=supabase`
+   - `SUPABASE_URL=...`
+   - `SUPABASE_SERVICE_ROLE_KEY=...`
+3. Start the server:
+
+```bash
+npm run build
+NODE_ENV=production npm start
+```
 
 ### Docker
 
