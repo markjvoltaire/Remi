@@ -13,11 +13,6 @@
 
 import type { SQSHandler, SQSRecord } from 'aws-lambda';
 import type { MessageReceivedEvent } from '../webhook/types.js';
-import {
-  extractTextContent,
-  extractImageUrls,
-  extractAudioUrls,
-} from '../webhook/types.js';
 import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from '../blooio/client.js';
 import { chat, getGroupChatAction, getTextForEffect } from '../claude/client.js';
 import { getUserProfile, setUserName, addMessage } from '../state/conversation.js';
@@ -67,25 +62,32 @@ export const handler: SQSHandler = async (event) => {
 
 async function processRecord(record: SQSRecord): Promise<void> {
   const webhookEvent = JSON.parse(record.body) as MessageReceivedEvent;
-  const data = webhookEvent.data as any;
+  const chatId: string | undefined = webhookEvent.external_id ?? webhookEvent.sender;
+  const from: string | undefined = webhookEvent.sender;
+  const messageId: string | undefined = webhookEvent.message_id;
+  const service = webhookEvent.protocol === 'sms'
+    ? 'SMS'
+    : webhookEvent.protocol === 'rcs'
+      ? 'RCS'
+      : 'iMessage';
+  const text = webhookEvent.text ?? '';
+  const attachments = Array.isArray(webhookEvent.attachments) ? webhookEvent.attachments : [];
+  const incomingEffect = undefined;
+  const incomingReplyTo = undefined;
 
-  const chatId: string | undefined = data.chat_id ?? data.chat?.id;
-  const from: string | undefined = data.from ?? data.sender_handle?.handle;
-  const messageId: string | undefined = data.message?.id ?? data.id;
-  const service = data.service;
-  const parts = (data.message?.parts ?? data.parts) as unknown;
-  const incomingEffect = (data.message?.effect ?? data.effect) ?? undefined;
-  const incomingReplyTo = (data.message?.reply_to ?? data.reply_to) ?? undefined;
-
-  if (!chatId || !from || !messageId || !Array.isArray(parts)) {
+  if (!chatId || !from || !messageId) {
     console.error(`[processor] Unexpected message.received payload shape (missing required fields)`);
     return;
   }
 
-  const typedParts = parts as any[];
-  const text = extractTextContent(typedParts as any);
-  const images = extractImageUrls(typedParts as any);
-  const audio = extractAudioUrls(typedParts as any);
+  const images = attachments
+    .filter((url): url is string => typeof url === 'string')
+    .filter(url => /\.(png|jpe?g|gif|webp|heic|heif)(\?|$)/i.test(url))
+    .map(url => ({ url, mimeType: 'image/*' }));
+  const audio = attachments
+    .filter((url): url is string => typeof url === 'string')
+    .filter(url => /\.(mp3|wav|m4a|aac|ogg|flac)(\?|$)/i.test(url))
+    .map(url => ({ url, mimeType: 'audio/*' }));
 
   const start = Date.now();
   console.log(`[processor] Processing message from ${redactPhone(from)}`);
