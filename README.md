@@ -154,7 +154,7 @@ Also supports Railway, Fly.io, and Heroku (`Procfile` included).
 
 - [Blooio](https://docs.blooio.com) — iMessage/SMS messaging API
 - [Claude](https://anthropic.com) (Anthropic) — AI reasoning with tool use
-- [Resy](https://resy.com) — Restaurant reservation platform
+- [Resy](https://resy.com) — Restaurant reservation platform to book
 
 ## License
 
