@@ -2,7 +2,7 @@
  * Lambda #1 — "Receiver"
  *
  * Handles all API Gateway HTTP events:
- *   POST /linq-webhook  → validate + enqueue to SQS → return 200 (~50ms)
+ *   POST /blooio-webhook  → validate + enqueue to SQS → return 200 (~50ms)
  *   GET  /auth/setup     → serve onboarding HTML
  *   POST /auth/setup/submit → handle credential submission
  *   GET  /health         → health check
@@ -15,22 +15,18 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from '
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import {
   isMessageReceivedEvent,
-  extractTextContent,
-  extractImageUrls,
-  extractAudioUrls,
 } from '../webhook/types.js';
 import type { WebhookEvent } from '../webhook/types.js';
 import { verifyAuthToken, getAuthTokenChatId } from '../auth/db.js';
 import { verifyMagicLinkToken } from '../auth/magicLink.js';
 import { setCredentials, createUser, getUser } from '../auth/db.js';
-import { sendMessage } from '../linq/client.js';
+import { sendMessage, verifyWebhookSignature } from '../blooio/client.js';
 import { redactPhone } from '../utils/redact.js';
 
 const sqs = new SQSClient({});
 const QUEUE_URL = process.env.SQS_QUEUE_URL!;
 
 // Bot numbers / sender filters (same as webhook handler)
-const botNumbers = process.env.LINQ_AGENT_BOT_NUMBERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
 const ignoredSenders = process.env.IGNORED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
 const allowedSenders = process.env.ALLOWED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
 
@@ -56,7 +52,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   }
 
   // ── Webhook ───────────────────────────────────────────────────────────
-  if (path === '/linq-webhook' && method === 'POST') {
+  if (path === '/blooio-webhook' && method === 'POST') {
     return handleWebhook(event);
   }
 
@@ -67,43 +63,47 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
 async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
   if (!event.body) return json(400, { error: 'Missing body' });
+  const rawBody = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString() : event.body;
+  const signatureHeader = event.headers['x-blooio-signature'] ?? event.headers['X-Blooio-Signature'];
+  if (!verifyWebhookSignature(rawBody, signatureHeader)) {
+    return json(401, { error: 'Invalid signature' });
+  }
 
   let webhookEvent: WebhookEvent;
   try {
-    webhookEvent = JSON.parse(event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString() : event.body);
+    webhookEvent = JSON.parse(rawBody);
   } catch {
     return json(400, { error: 'Invalid JSON' });
   }
 
   const pstTime = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour12: false });
-  console.log(`[webhook] ${pstTime} PST | ${webhookEvent.event_type} (${webhookEvent.event_id})`);
+  console.log(`[webhook] ${pstTime} PST | ${webhookEvent.event} (${webhookEvent.message_id ?? 'n/a'})`);
 
   // Only process message.received events
   if (!isMessageReceivedEvent(webhookEvent)) {
     return json(200, { received: true });
   }
 
-  const data = webhookEvent.data as any;
+  const botNumber = process.env.BLOOIO_PHONE_NUMBER?.trim();
+  const chatId: string | undefined = webhookEvent.external_id ?? webhookEvent.sender;
+  const from: string | undefined = webhookEvent.sender;
+  const recipientPhone: string | undefined = webhookEvent.internal_id;
+  const messageId: string | undefined = webhookEvent.message_id;
+  const text = webhookEvent.text ?? '';
+  const attachments = Array.isArray(webhookEvent.attachments) ? webhookEvent.attachments : [];
 
-  const chatId: string | undefined = data.chat_id ?? data.chat?.id;
-  const from: string | undefined = data.from ?? data.sender_handle?.handle;
-  const recipientPhone: string | undefined = data.recipient_phone ?? data.chat?.owner_handle?.handle;
-  const isFromMe: boolean = Boolean(data.is_from_me ?? data.sender_handle?.is_me);
-  const messageId: string | undefined = data.message?.id ?? data.id;
-  const parts = (data.message?.parts ?? data.parts) as unknown;
-
-  if (!chatId || !from || !recipientPhone || !messageId || !Array.isArray(parts)) {
+  if (!chatId || !from || !recipientPhone || !messageId) {
     console.error(`[webhook] Unexpected message.received payload shape (missing required fields)`);
     return json(200, { received: true });
   }
 
   // Filter checks (same logic as webhook/handler.ts)
-  if (botNumbers.length > 0 && !botNumbers.includes(recipientPhone)) {
+  if (botNumber && recipientPhone !== botNumber) {
     console.log(`[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot's number)`);
     return json(200, { received: true });
   }
-  if (isFromMe) {
-    console.log(`[webhook] Skipping own message`);
+  if (botNumber && from === botNumber) {
+    console.log('[webhook] Skipping own message');
     return json(200, { received: true });
   }
   if (allowedSenders.length > 0 && !allowedSenders.includes(from)) {
@@ -115,10 +115,12 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
     return json(200, { received: true });
   }
 
-  const typedParts = parts as any[];
-  const text = extractTextContent(typedParts as any);
-  const images = extractImageUrls(typedParts as any);
-  const audio = extractAudioUrls(typedParts as any);
+  const images = attachments
+    .filter((url): url is string => typeof url === 'string')
+    .filter(url => /\.(png|jpe?g|gif|webp|heic|heif)(\?|$)/i.test(url));
+  const audio = attachments
+    .filter((url): url is string => typeof url === 'string')
+    .filter(url => /\.(mp3|wav|m4a|aac|ogg|flac)(\?|$)/i.test(url));
 
   if (!text.trim() && images.length === 0 && audio.length === 0) {
     console.log(`[webhook] Skipping empty message`);
@@ -130,7 +132,7 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
     QueueUrl: QUEUE_URL,
     MessageBody: JSON.stringify(webhookEvent),
     MessageGroupId: chatId, // FIFO: serialize per chat
-    MessageDeduplicationId: webhookEvent.event_id,
+    MessageDeduplicationId: messageId,
   }));
 
   console.log(`[webhook] Enqueued message from ${redactPhone(from)} for processing`);
@@ -245,9 +247,9 @@ function errorPage(title: string, message: string): string {
 </head>
 <body>
   <div class="container">
-    <div class="header-bar"><div class="logo-row"><span class="linq-wordmark">Linq</span></div></div>
+    <div class="header-bar"><div class="logo-row"><span class="linq-wordmark">Blooio</span></div></div>
     <div class="card"><div class="error-wrap"><h1>${title}</h1><p class="muted">${message}</p></div></div>
-    <p class="footer-text">Built on <a href="https://linqapp.com" target="_blank" class="accent-link">Linq</a></p>
+    <p class="footer-text">Built on <a href="https://docs.blooio.com" target="_blank" class="accent-link">Blooio</a></p>
   </div>
 </body>
 </html>`;
@@ -280,7 +282,7 @@ function onboardingPage(token: string): string {
 </head>
 <body>
   <div class="container">
-    <div class="header-bar"><div class="logo-row"><span class="linq-wordmark">Linq</span></div></div>
+    <div class="header-bar"><div class="logo-row"><span class="linq-wordmark">Blooio</span></div></div>
     <div class="card"><div class="card-content">
       <div class="title-section"><h1>Connect Resy</h1><p class="muted">Paste your Resy auth token to enable reservations</p></div>
       <div id="form-section">
@@ -299,7 +301,7 @@ function onboardingPage(token: string): string {
         <h2>You're all set</h2><p>Go back to iMessage and start booking</p>
       </div>
     </div></div>
-    <p class="footer-text">Built on <a href="https://linqapp.com" target="_blank" class="accent-link">Linq</a></p>
+    <p class="footer-text">Built on <a href="https://docs.blooio.com" target="_blank" class="accent-link">Blooio</a></p>
   </div>
   <script>
     async function handleSubmit(e) {

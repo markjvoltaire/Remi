@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { verifyAuthToken, getAuthTokenChatId } from './db.js';
 import { verifyMagicLinkToken } from './magicLink.js';
 import { setCredentials, createUser, getUser } from './db.js';
-import { sendMessage } from '../linq/client.js';
+import { sendMessage } from '../blooio/client.js';
 import { redactPhone } from '../utils/redact.js';
 
 export const authRoutes = Router();
@@ -311,7 +311,7 @@ function headerHTML(): string {
   return `
     <div class="header-bar">
       <div class="logo-row">
-        <span class="linq-wordmark">Linq</span>
+        <span class="linq-wordmark">Blooio</span>
       </div>
     </div>`;
 }
@@ -319,7 +319,7 @@ function headerHTML(): string {
 function footerHTML(): string {
   return `
     <p class="footer-text">
-      Built on <a href="https://linqapp.com" target="_blank" class="accent-link">Linq</a>
+      Built on <a href="https://docs.blooio.com" target="_blank" class="accent-link">Blooio</a>
     </p>`;
 }
 

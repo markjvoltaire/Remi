@@ -5,7 +5,7 @@ import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 // available when the handler module's top-level code reads process.env
 const { mockSqsSend } = vi.hoisted(() => {
   process.env.SQS_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/123/queue';
-  process.env.LINQ_AGENT_BOT_NUMBERS = '';
+  process.env.BLOOIO_PHONE_NUMBER = '';
   process.env.IGNORED_SENDERS = '+1ignored';
   process.env.ALLOWED_SENDERS = '';
   return { mockSqsSend: vi.fn().mockResolvedValue({}) };
@@ -36,8 +36,9 @@ vi.mock('../../auth/magicLink.js', () => ({
   verifyMagicLinkToken: (...args: unknown[]) => mockVerifyMagicLinkToken(...args),
 }));
 
-vi.mock('../../linq/client.js', () => ({
+vi.mock('../../blooio/client.js', () => ({
   sendMessage: vi.fn().mockResolvedValue({}),
+  verifyWebhookSignature: vi.fn().mockReturnValue(true),
 }));
 
 import { handler } from '../../handlers/receiver.js';
@@ -69,25 +70,16 @@ function makeEvent(overrides: Partial<APIGatewayProxyEventV2> & { method?: strin
 
 function makeWebhookBody(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
-    api_version: 'v3',
-    event_id: 'evt_1',
-    created_at: new Date().toISOString(),
-    trace_id: 'tr_1',
-    partner_id: 'p_1',
-    event_type: 'message.received',
-    data: {
-      chat_id: 'chat_1',
-      from: '+14155551234',
-      recipient_phone: '+14155550000',
-      received_at: new Date().toISOString(),
-      is_from_me: false,
-      service: 'iMessage',
-      message: {
-        id: 'msg_1',
-        parts: [{ type: 'text', value: 'hello' }],
-      },
-      ...overrides,
-    },
+    event: 'message.received',
+    message_id: 'msg_1',
+    sender: '+14155551234',
+    external_id: 'chat_1',
+    internal_id: '+14155550000',
+    text: 'hello',
+    received_at: Date.now(),
+    attachments: [],
+    is_group: false,
+    ...overrides,
   });
 }
 
@@ -113,10 +105,10 @@ describe('receiver handler', () => {
 
   // ── Webhook ──────────────────────────────────────────────────────────
 
-  it('POST /linq-webhook with valid event enqueues to SQS + returns 200', async () => {
+  it('POST /blooio-webhook with valid event enqueues to SQS + returns 200', async () => {
     const result = await handler(makeEvent({
       method: 'POST',
-      path: '/linq-webhook',
+      path: '/blooio-webhook',
       body: makeWebhookBody(),
     }));
 
@@ -124,22 +116,24 @@ describe('receiver handler', () => {
     expect(mockSqsSend).toHaveBeenCalledTimes(1);
   });
 
-  it('POST /linq-webhook skips own messages (is_from_me)', async () => {
+  it('POST /blooio-webhook skips own messages (sender=bot number)', async () => {
+    process.env.BLOOIO_PHONE_NUMBER = '+14155551234';
     const result = await handler(makeEvent({
       method: 'POST',
-      path: '/linq-webhook',
-      body: makeWebhookBody({ is_from_me: true }),
+      path: '/blooio-webhook',
+      body: makeWebhookBody({ internal_id: '+14155551234', sender: '+14155551234' }),
     }));
 
     expect(result.statusCode).toBe(200);
     expect(mockSqsSend).not.toHaveBeenCalled();
+    process.env.BLOOIO_PHONE_NUMBER = '';
   });
 
-  it('POST /linq-webhook skips ignored senders', async () => {
+  it('POST /blooio-webhook skips ignored senders', async () => {
     const result = await handler(makeEvent({
       method: 'POST',
-      path: '/linq-webhook',
-      body: makeWebhookBody({ from: '+1ignored' }),
+      path: '/blooio-webhook',
+      body: makeWebhookBody({ sender: '+1ignored' }),
     }));
 
     expect(result.statusCode).toBe(200);

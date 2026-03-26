@@ -2,14 +2,12 @@ import { Request, Response } from 'express';
 import {
   WebhookEvent,
   isMessageReceivedEvent,
-  extractTextContent,
-  extractImageUrls,
-  extractAudioUrls,
   ExtractedMedia,
   MessageEffect,
   ReplyTo,
 } from './types.js';
 import { redactPhone } from '../utils/redact.js';
+import { verifyWebhookSignature } from '../blooio/client.js';
 
 export type MessageService = 'iMessage' | 'SMS' | 'RCS';
 
@@ -18,19 +16,25 @@ export interface MessageHandler {
 }
 
 export function createWebhookHandler(onMessage: MessageHandler) {
-  // Bot numbers this agent runs on (comma-separated, supports multiple)
-  // If not set, responds to messages to any number
-  const botNumbers = process.env.LINQ_AGENT_BOT_NUMBERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
+  const botNumber = process.env.BLOOIO_PHONE_NUMBER?.trim();
   // Sender numbers to ignore (comma-separated)
   const ignoredSenders = process.env.IGNORED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
   // If set, ONLY respond to these sender numbers (for local dev)
   const allowedSenders = process.env.ALLOWED_SENDERS?.split(',').map(p => p.trim()).filter(Boolean) || [];
 
   return async (req: Request, res: Response) => {
+    const rawBody = ((req as Request & { rawBody?: string }).rawBody) ?? JSON.stringify(req.body ?? {});
+    const signatureHeader = req.get('X-Blooio-Signature');
+    if (!verifyWebhookSignature(rawBody, signatureHeader)) {
+      console.error('[webhook] Invalid Blooio signature');
+      res.status(401).json({ error: 'Invalid signature' });
+      return;
+    }
+
     const event = req.body as WebhookEvent;
 
     const pstTime = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour12: false });
-    console.log(`[webhook] ${pstTime} PST | ${event.event_type} (${event.event_id})`);
+    console.log(`[webhook] ${pstTime} PST | ${event.event} (${event.message_id ?? 'n/a'})`);
 
     // Acknowledge receipt immediately
     res.status(200).json({ received: true });
@@ -42,34 +46,30 @@ export function createWebhookHandler(onMessage: MessageHandler) {
         console.log(`[webhook] Full payload:`, JSON.stringify(event, null, 2));
       }
 
-      const data = event.data as any;
+      const chatId: string | undefined = event.external_id ?? event.sender;
+      const from: string | undefined = event.sender;
+      const recipientPhone: string | undefined = event.internal_id;
+      const messageId: string | undefined = event.message_id;
+      const text = event.text ?? '';
+      const attachments = Array.isArray(event.attachments) ? event.attachments : [];
+      const service: MessageService | undefined = event.protocol === 'sms'
+        ? 'SMS'
+        : event.protocol === 'rcs'
+          ? 'RCS'
+          : 'iMessage';
 
-      // Support both legacy + current Linq payload shapes
-      const chatId: string | undefined = data.chat_id ?? data.chat?.id;
-      const from: string | undefined = data.from ?? data.sender_handle?.handle;
-      const recipientPhone: string | undefined = data.recipient_phone ?? data.chat?.owner_handle?.handle;
-      const isFromMe: boolean = Boolean(data.is_from_me ?? data.sender_handle?.is_me);
-      const service: MessageService | undefined = data.service;
-
-      const messageId: string | undefined = data.message?.id ?? data.id;
-      const parts = (data.message?.parts ?? data.parts) as unknown;
-      const incomingEffect = (data.message?.effect ?? data.effect) as MessageEffect | undefined | null;
-      const incomingReplyTo = (data.message?.reply_to ?? data.reply_to) as ReplyTo | undefined | null;
-
-      if (!chatId || !from || !recipientPhone || !messageId || !Array.isArray(parts)) {
+      if (!chatId || !from || !recipientPhone || !messageId) {
         console.error(`[webhook] Unexpected message.received payload shape (missing required fields)`);
         return;
       }
 
-      // Only process messages sent to this bot's phone numbers
-      if (botNumbers.length > 0 && !botNumbers.includes(recipientPhone)) {
+      // Only process messages sent to this bot's phone number
+      if (botNumber && recipientPhone !== botNumber) {
         console.log(`[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot's number)`);
         return;
       }
-
-      // Skip messages from ourselves
-      if (isFromMe) {
-        console.log(`[webhook] Skipping own message`);
+      if (botNumber && from === botNumber) {
+        console.log('[webhook] Skipping own message');
         return;
       }
 
@@ -85,10 +85,16 @@ export function createWebhookHandler(onMessage: MessageHandler) {
         return;
       }
 
-      const typedParts = parts as any[];
-      const text = extractTextContent(typedParts as any);
-      const images = extractImageUrls(typedParts as any);
-      const audio = extractAudioUrls(typedParts as any);
+      const images: ExtractedMedia[] = attachments
+        .filter((url): url is string => typeof url === 'string')
+        .filter(url => /\.(png|jpe?g|gif|webp|heic|heif)(\?|$)/i.test(url))
+        .map(url => ({ url, mimeType: 'image/*' }));
+      const audio: ExtractedMedia[] = attachments
+        .filter((url): url is string => typeof url === 'string')
+        .filter(url => /\.(mp3|wav|m4a|aac|ogg|flac)(\?|$)/i.test(url))
+        .map(url => ({ url, mimeType: 'audio/*' }));
+      const incomingEffect = undefined as MessageEffect | undefined;
+      const incomingReplyTo = undefined as ReplyTo | undefined;
 
       if (!text.trim() && images.length === 0 && audio.length === 0) {
         console.log(`[webhook] Skipping empty message`);

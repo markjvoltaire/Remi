@@ -1,8 +1,8 @@
-# Linq Resy Agent
+# Blooio Resy Agent
 
 A Resy reservation agent accessible via iMessage. Text the bot to search restaurants, check availability, and book tables — all through natural conversation.
 
-Built on [Linq Blue](https://linqapp.com) and powered by Claude (Anthropic).
+Built on [Blooio](https://docs.blooio.com) and powered by Claude (Anthropic).
 
 ## What it does
 
@@ -15,7 +15,7 @@ Built on [Linq Blue](https://linqapp.com) and powered by Claude (Anthropic).
 ## Architecture
 
 ```
-User ──iMessage──▶ Linq Blue ──webhook──▶ linq-resy-agent ──▶ Claude (tool-use loop)
+User ──iMessage/SMS──▶ Blooio ──webhook──▶ blooio-resy-agent ──▶ Claude (tool-use loop)
                                                │                    │
                                                │     ◀── tools ◀────┘
                                                │     resy_search
@@ -24,7 +24,7 @@ User ──iMessage──▶ Linq Blue ──webhook──▶ linq-resy-agent �
                                                │     resy_cancel
                                                │     resy_reservations
                                                ▼
-User ◀─iMessage── Linq Blue ◀───API──── Response
+User ◀─iMessage/SMS── Blooio ◀───API──── Response
 ```
 
 ## Quick Start
@@ -33,7 +33,7 @@ User ◀─iMessage── Linq Blue ◀───API──── Response
 
 - [Node.js](https://nodejs.org) 20+
 - [ngrok](https://ngrok.com) (for local development)
-- [Linq Blue](https://linqapp.com) account (free sandbox)
+- [Blooio](https://docs.blooio.com) account
 - [Anthropic](https://console.anthropic.com) API key
 - A [Resy](https://resy.com) account
 
@@ -71,7 +71,7 @@ npm run dev
 ngrok http 3000
 ```
 
-Set your ngrok URL as the webhook in your [Linq Blue dashboard](https://linqapp.com).
+Set your ngrok URL as the webhook in your Blooio dashboard, using path `/blooio-webhook`.
 
 ## Project Structure
 
@@ -90,8 +90,8 @@ src/
 │   ├── client.ts         # Resy API client (search, slots, book, cancel)
 │   ├── types.ts          # Resy type definitions
 │   └── index.ts          # Barrel export
-├── linq/
-│   └── client.ts         # Linq Blue API (send messages, reactions, effects)
+├── blooio/
+│   └── client.ts         # Blooio API (send messages + compatibility shims)
 ├── state/
 │   └── conversation.ts   # Conversation history and user profiles (in-memory)
 ├── utils/
@@ -144,15 +144,15 @@ NODE_ENV=production npm start
 ### Docker
 
 ```bash
-docker build -t linq-resy-agent .
-docker run -p 3000:3000 --env-file .env linq-resy-agent
+docker build -t blooio-resy-agent .
+docker run -p 3000:3000 --env-file .env blooio-resy-agent
 ```
 
 Also supports Railway, Fly.io, and Heroku (`Procfile` included).
 
 ## Built with
 
-- [Linq Blue](https://linqapp.com) — iMessage/RCS messaging API
+- [Blooio](https://docs.blooio.com) — iMessage/SMS messaging API
 - [Claude](https://anthropic.com) (Anthropic) — AI reasoning with tool use
 - [Resy](https://resy.com) — Restaurant reservation platform
 

@@ -1,73 +1,26 @@
-// Linq Blue V3 Webhook Types
-// Ref: https://apidocs.linqapp.com/webhook-events
-
 export interface WebhookEvent {
-  api_version: 'v3';
-  event_id: string;
-  created_at: string;
-  trace_id: string;
-  partner_id: string;
-  event_type: string;
-  data: unknown;
+  event: string;
+  message_id?: string;
+  sender?: string;
+  external_id?: string;
+  text?: string;
+  received_at?: number;
+  attachments?: string[];
+  is_group?: boolean;
+  protocol?: 'imessage' | 'sms' | 'rcs' | 'non-imessage';
+  timestamp?: number;
+  internal_id?: string;
 }
 
 export interface MessageReceivedEvent extends WebhookEvent {
-  event_type: 'message.received';
-  data: MessageReceivedData;
-}
-
-/**
- * Linq webhook payloads have evolved over time. This project supports both:
- * - Legacy shape (chat_id/from/recipient_phone/message)
- * - Current shape (chat/id, sender_handle/owner_handle, parts at root)
- */
-export type MessageReceivedData = MessageReceivedDataLegacy | MessageReceivedDataCurrent;
-
-export interface MessageReceivedDataLegacy {
-  chat_id: string;
-  from: string;
-  recipient_phone: string;
-  received_at: string;
-  is_from_me: boolean;
-  service: 'iMessage' | 'SMS' | 'RCS';
-  message: IncomingMessage;
-}
-
-export interface MessageHandle {
-  handle: string;
-  id: string;
-  is_me: boolean;
-  joined_at: string;
-  left_at: string | null;
-  service: 'iMessage' | 'SMS' | 'RCS';
-  status: string;
-}
-
-export interface MessageChat {
-  id: string;
+  event: 'message.received';
+  message_id: string;
+  sender: string;
+  external_id: string;
+  text: string;
+  received_at: number;
+  attachments: string[];
   is_group: boolean;
-  owner_handle: MessageHandle;
-}
-
-export interface MessageReceivedDataCurrent {
-  chat: MessageChat;
-  direction: 'inbound' | 'outbound';
-  id: string;
-  parts: MessagePart[];
-  sender_handle: MessageHandle;
-  service: 'iMessage' | 'SMS' | 'RCS';
-  sent_at: string;
-  effect: MessageEffect | null;
-  reply_to: ReplyTo | null;
-  delivered_at: string | null;
-  read_at: string | null;
-}
-
-export interface IncomingMessage {
-  id: string;
-  parts: MessagePart[];
-  effect?: MessageEffect;
-  reply_to?: ReplyTo;
 }
 
 export interface TextPart {
@@ -78,10 +31,7 @@ export interface TextPart {
 export interface MediaPart {
   type: 'media';
   url?: string;
-  attachment_id?: string;
-  filename?: string;
   mime_type?: string;
-  size?: number;
 }
 
 export type MessagePart = TextPart | MediaPart;
@@ -97,7 +47,7 @@ export interface ReplyTo {
 }
 
 export function isMessageReceivedEvent(event: WebhookEvent): event is MessageReceivedEvent {
-  return event.event_type === 'message.received';
+  return event.event === 'message.received';
 }
 
 export function extractTextContent(parts: MessagePart[]): string {

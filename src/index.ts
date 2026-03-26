@@ -2,7 +2,7 @@ import 'dotenv/config';
 import path from 'node:path';
 import express from 'express';
 import { createWebhookHandler } from './webhook/handler.js';
-import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from './linq/client.js';
+import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from './blooio/client.js';
 import { chat, getGroupChatAction, getTextForEffect } from './claude/client.js';
 import { getUserProfile, addMessage } from './state/conversation.js';
 import { authRoutes, getUser, createUser, loadUserContext, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, setCredentials, clearSignedOut } from './auth/index.js';
@@ -45,7 +45,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Parse JSON bodies (cap at 50KB to prevent abuse — PEM keys are ~2KB)
-app.use(express.json({ limit: '50kb' }));
+app.use(express.json({
+  limit: '50kb',
+  verify: (req, _res, buf) => {
+    (req as { rawBody?: string }).rawBody = buf.toString('utf8');
+  },
+}));
 
 // Security headers on all responses
 app.use((_req, res, next) => {
@@ -82,9 +87,9 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Webhook endpoint for Linq Blue
+// Webhook endpoint for Blooio
 app.post(
-  '/linq-webhook',
+  '/blooio-webhook',
   createWebhookHandler(async (chatId, from, text, messageId, images, audio, incomingEffect, incomingReplyTo, service) => {
     const start = Date.now();
     console.log(`[main] Processing message from ${redactPhone(from)}`);
@@ -406,19 +411,19 @@ if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
   app.listen(PORT, () => {
     console.log(`
 ╔═══════════════════════════════════════════════════════╗
-║              Linq Bookings Agent                      ║
+║             Blooio Bookings Agent                     ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Server running on http://localhost:${PORT}              ║
 ║                                                       ║
 ║  Endpoints:                                           ║
-║    POST /linq-webhook  - Linq Blue webhook receiver   ║
+║    POST /blooio-webhook - Blooio webhook receiver     ║
 ║    GET  /health        - Health check                 ║
 ║    GET  /auth/setup    - Onboarding page              ║
 ║                                                       ║
 ║  Next steps:                                          ║
 ║    1. Run: ngrok http ${PORT}                            ║
-║    2. Configure webhook URL in Linq Blue              ║
-║    3. Text your Linq Blue number!                     ║
+║    2. Configure webhook URL in Blooio                 ║
+║    3. Text your Blooio number!                        ║
 ╚═══════════════════════════════════════════════════════╝
     `);
   });

@@ -20,7 +20,7 @@ const mockGetChat = vi.fn().mockResolvedValue({
   service: 'iMessage',
 });
 
-vi.mock('../../linq/client.js', () => ({
+vi.mock('../../blooio/client.js', () => ({
   sendMessage: (...args: unknown[]) => mockSendMessage(...args),
   markAsRead: (...args: unknown[]) => mockMarkAsRead(...args),
   startTyping: (...args: unknown[]) => mockStartTyping(...args),

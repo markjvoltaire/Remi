@@ -18,7 +18,7 @@ import {
   extractImageUrls,
   extractAudioUrls,
 } from '../webhook/types.js';
-import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from '../linq/client.js';
+import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from '../blooio/client.js';
 import { chat, getGroupChatAction, getTextForEffect } from '../claude/client.js';
 import { getUserProfile, setUserName, addMessage } from '../state/conversation.js';
 import {
