@@ -6,7 +6,15 @@ import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, g
 import { chat, getGroupChatAction, getTextForEffect } from './claude/client.js';
 import { getUserProfile, addMessage, setUserName, addUserFact } from './state/conversation.js';
 import { authRoutes, getUser, createUser, loadUserContext, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, setCredentials, clearSignedOut, getProfileOnboarding, setProfileOnboarding } from './auth/index.js';
-import { sendResyOTP, verifyResyOTP, completeResyChallenge, registerResyUser } from './bookings/index.js';
+import {
+  sendResyOTP,
+  verifyResyOTP,
+  completeResyChallenge,
+  registerResyUser,
+  verifyPaymentStatus,
+  recordPaymentSnapshotTransition,
+  messageSuggestsBookingIntent,
+} from './bookings/index.js';
 import { resyLinkMessages } from './auth/resyLinkMessages.js';
 import { redactPhone } from './utils/redact.js';
 import { putItem } from './db/storage.js';
@@ -369,6 +377,12 @@ app.post(
         console.log(`[main] User ${redactPhone(from)} exists but no credentials`);
       }
 
+      // Preserve guest intent in thread so Remi can pick up after partner verification
+      const inbound = text.trim();
+      if (inbound) {
+        await addMessage(chatId, 'user', inbound, from);
+      }
+
       // Send SMS OTP
       const otpResult = await sendResyOTP(from);
       if (otpResult === 'sms') {
@@ -430,6 +444,20 @@ app.post(
       console.log(`[main] User ${redactPhone(from)} just completed onboarding — injecting context`);
     }
 
+    let hasPaymentMethod: boolean | undefined;
+    let paymentBecameAvailable = false;
+    const resyToken = userCtx.bookingsCredentials?.resyAuthToken;
+    if (resyToken && messageSuggestsBookingIntent(text)) {
+      try {
+        const payStatus = await verifyPaymentStatus(resyToken);
+        const snap = recordPaymentSnapshotTransition(from, payStatus);
+        hasPaymentMethod = payStatus.hasPaymentMethod;
+        paymentBecameAvailable = snap.paymentBecameAvailable;
+      } catch (err) {
+        console.warn(`[main] verifyPaymentStatus failed (non-fatal): ${err}`);
+      }
+    }
+
     // Get Claude's response (typing indicator shows while this runs)
     const { text: responseText, reaction, effect, renameChat, rememberedUser } = await chat(chatId, text, images, audio, {
       isGroupChat,
@@ -441,6 +469,8 @@ app.post(
       service,
       bookingsCredentials: userCtx.bookingsCredentials,
       justOnboarded,
+      hasPaymentMethod,
+      paymentBecameAvailable,
     });
     console.log(`[timing] claude: ${Date.now() - start}ms`);
     console.log(`[debug] responseText: ${responseText ? `"${responseText.substring(0, 50)}..."` : 'null'}, effect: ${effect ? JSON.stringify(effect) : 'null'}, renameChat: ${renameChat || 'null'}`);

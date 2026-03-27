@@ -247,7 +247,9 @@ export async function bookReservation(
 
   const paymentMethod = userData.payment_methods?.find(pm => pm.is_default) || userData.payment_methods?.[0];
   if (!paymentMethod) {
-    throw new Error('No payment method on file. Add one at resy.com/account before booking.');
+    throw new Error(
+      'No payment method on file. Sign in at https://resy.com/login, add a card under your profile, then try again.',
+    );
   }
   console.log(`[resy] Using payment method ${paymentMethod.id}`);
 
@@ -329,6 +331,66 @@ export async function getResyProfile(authToken: string): Promise<Record<string, 
     is_resy_select: data.resy_select,
     profile_image_url: data.profile_image_url,
   };
+}
+
+/** Result of a silent partner payment check (GET /2/user payment_methods). */
+export interface VerifyPaymentStatusResult {
+  hasPaymentMethod: boolean;
+  defaultPaymentMethodId: number | null;
+  /** Stable fingerprint of saved method IDs for transition detection. */
+  fingerprint: string;
+}
+
+/**
+ * Confirm whether the guest has at least one payment method on file with Resy.
+ * Uses the same /2/user endpoint as booking (x-resy-auth-token).
+ */
+export async function verifyPaymentStatus(authToken: string): Promise<VerifyPaymentStatusResult> {
+  console.log('[resy] verifyPaymentStatus: fetching /2/user');
+
+  const res = await resyFetch(authToken, '/2/user', { method: 'GET' });
+  const data = await res.json() as {
+    payment_methods?: Array<{ id: number; is_default: boolean }>;
+  };
+
+  const pms = data.payment_methods ?? [];
+  const paymentMethod = pms.find(pm => pm.is_default) || pms[0];
+  const ids = pms.map(p => p.id).sort((a, b) => a - b);
+  const fingerprint = ids.length > 0 ? ids.join(',') : '';
+
+  return {
+    hasPaymentMethod: !!paymentMethod,
+    defaultPaymentMethodId: paymentMethod?.id ?? null,
+    fingerprint,
+  };
+}
+
+const paymentSnapshotByPhone = new Map<string, 'none' | string>();
+
+/**
+ * Track last known payment snapshot per phone so we can detect none → card transitions
+ * (e.g. guest returned from the front-desk link) and auto-resume booking via Claude context.
+ */
+export function recordPaymentSnapshotTransition(
+  phone: string,
+  status: VerifyPaymentStatusResult,
+): { paymentBecameAvailable: boolean } {
+  const next = status.hasPaymentMethod && status.fingerprint ? `has:${status.fingerprint}` : 'none';
+  const prev = paymentSnapshotByPhone.get(phone);
+  paymentSnapshotByPhone.set(phone, next);
+  const paymentBecameAvailable = prev === 'none' && status.hasPaymentMethod;
+  console.log(
+    `[resy] payment snapshot ${phone}: prev=${prev ?? 'unset'} → ${next}, becameAvailable=${paymentBecameAvailable}`,
+  );
+  return { paymentBecameAvailable };
+}
+
+/** Heuristic: run silent payment check when guest may be booking or wrapping a payment step. */
+export function messageSuggestsBookingIntent(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  if (/^(ok|done|ready|yes|yep|yeah|sure|added|all set|finished)\.?$/i.test(t)) return true;
+  return /\b(book|booking|reservation|reservations|reserve|table|dinner|lunch|brunch|tonight|tomorrow|tonite|party|guests?|people|covers|pm\b|am\b|:\d{2}\b|o\'clock|resy|hold|confirm)\b/i.test(t);
 }
 
 /**

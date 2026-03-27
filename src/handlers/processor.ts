@@ -22,7 +22,15 @@ import {
   setPendingChallenge, getPendingChallenge, clearPendingChallenge,
   setCredentials, clearSignedOut,
 } from '../auth/index.js';
-import { sendResyOTP, verifyResyOTP, completeResyChallenge, registerResyUser } from '../bookings/index.js';
+import {
+  sendResyOTP,
+  verifyResyOTP,
+  completeResyChallenge,
+  registerResyUser,
+  verifyPaymentStatus,
+  recordPaymentSnapshotTransition,
+  messageSuggestsBookingIntent,
+} from '../bookings/index.js';
 import { resyLinkMessages } from '../auth/resyLinkMessages.js';
 import { redactPhone } from '../utils/redact.js';
 import { getItem, putItem } from '../db/storage.js';
@@ -278,6 +286,11 @@ async function processRecord(record: SQSRecord): Promise<void> {
       console.log(`[processor] New user: ${redactPhone(from)}`);
     }
 
+    const inbound = text.trim();
+    if (inbound) {
+      await addMessage(chatId, 'user', inbound, from);
+    }
+
     const otpResult = await sendResyOTP(from);
     if (otpResult === 'sms') {
       await setPendingOTP(from, chatId);
@@ -319,6 +332,20 @@ async function processRecord(record: SQSRecord): Promise<void> {
   // ── Main Claude response ────────────────────────────────────────────
   const justOnboarded = await consumeJustOnboarded(from);
 
+  let hasPaymentMethod: boolean | undefined;
+  let paymentBecameAvailable = false;
+  const resyToken = userCtx.bookingsCredentials?.resyAuthToken;
+  if (resyToken && messageSuggestsBookingIntent(text)) {
+    try {
+      const payStatus = await verifyPaymentStatus(resyToken);
+      const snap = recordPaymentSnapshotTransition(from, payStatus);
+      hasPaymentMethod = payStatus.hasPaymentMethod;
+      paymentBecameAvailable = snap.paymentBecameAvailable;
+    } catch (err) {
+      console.warn(`[processor] verifyPaymentStatus failed (non-fatal): ${err}`);
+    }
+  }
+
   const { text: responseText, reaction, effect, renameChat, rememberedUser } = await chat(chatId, text, images, audio, {
     isGroupChat,
     participantNames,
@@ -329,6 +356,8 @@ async function processRecord(record: SQSRecord): Promise<void> {
     service,
     bookingsCredentials: userCtx.bookingsCredentials,
     justOnboarded,
+    hasPaymentMethod,
+    paymentBecameAvailable,
   });
   console.log(`[timing] claude: ${Date.now() - start}ms`);
 

@@ -85,11 +85,23 @@ vi.mock('../../auth/index.js', () => ({
 const mockSendResyOTP = vi.fn().mockResolvedValue('sms');
 const mockVerifyResyOTP = vi.fn();
 const mockCompleteResyChallenge = vi.fn();
+const mockRegisterResyUser = vi.fn().mockResolvedValue(null);
+const mockVerifyPaymentStatus = vi.fn().mockResolvedValue({
+  hasPaymentMethod: true,
+  defaultPaymentMethodId: 1,
+  fingerprint: '1',
+});
+const mockRecordPaymentSnapshotTransition = vi.fn().mockReturnValue({ paymentBecameAvailable: false });
+const mockMessageSuggestsBookingIntent = vi.fn().mockReturnValue(true);
 
 vi.mock('../../bookings/index.js', () => ({
   sendResyOTP: (...args: unknown[]) => mockSendResyOTP(...args),
   verifyResyOTP: (...args: unknown[]) => mockVerifyResyOTP(...args),
   completeResyChallenge: (...args: unknown[]) => mockCompleteResyChallenge(...args),
+  registerResyUser: (...args: unknown[]) => mockRegisterResyUser(...args),
+  verifyPaymentStatus: (...args: unknown[]) => mockVerifyPaymentStatus(...args),
+  recordPaymentSnapshotTransition: (...args: unknown[]) => mockRecordPaymentSnapshotTransition(...args),
+  messageSuggestsBookingIntent: (...args: unknown[]) => mockMessageSuggestsBookingIntent(...args),
 }));
 
 // Mock storage getItem/putItem for chat count
@@ -172,6 +184,13 @@ beforeEach(() => {
     renameChat: null,
     rememberedUser: null,
   });
+  mockMessageSuggestsBookingIntent.mockReturnValue(true);
+  mockVerifyPaymentStatus.mockResolvedValue({
+    hasPaymentMethod: true,
+    defaultPaymentMethodId: 1,
+    fingerprint: '1',
+  });
+  mockRecordPaymentSnapshotTransition.mockReturnValue({ paymentBecameAvailable: false });
 });
 
 describe('processor handler', () => {
@@ -219,6 +238,7 @@ describe('processor handler', () => {
 
     await handler(makeSQSEvent('find me a restaurant'), dummyContext, () => {});
 
+    expect(mockAddMessage).toHaveBeenCalledWith('chat_1', 'user', 'find me a restaurant', '+14155551234');
     expect(mockSendResyOTP).toHaveBeenCalledWith('+14155551234');
     expect(mockSetPendingOTP).toHaveBeenCalled();
   });
