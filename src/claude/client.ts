@@ -367,6 +367,61 @@ const DATA_RETRIEVAL_TOOLS = new Set([
 ]);
 
 const MAX_TOOL_LOOPS = 5;
+const MAX_CACHED_VENUES = 20;
+
+type VenueSelection = { venue_id: number; name: string };
+const recentVenueOptionsByChat = new Map<string, VenueSelection[]>();
+
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function ordinalToIndex(message: string): number | null {
+  const m = normalizeText(message);
+  const byWord: Record<string, number> = {
+    first: 0,
+    second: 1,
+    third: 2,
+    fourth: 3,
+    fifth: 4,
+  };
+  for (const [word, idx] of Object.entries(byWord)) {
+    if (m.includes(word)) return idx;
+  }
+  const numMatch = m.match(/\b(\d{1,2})(st|nd|rd|th)?\b/);
+  if (!numMatch) return null;
+  const n = Number(numMatch[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n - 1;
+}
+
+function resolveVenueFromSelection(
+  chatId: string,
+  userMessage: string,
+  fallbackVenueId: number,
+): number {
+  const cached = recentVenueOptionsByChat.get(chatId);
+  if (!cached || cached.length === 0) return fallbackVenueId;
+
+  const normalizedMessage = normalizeText(userMessage);
+  if (!normalizedMessage) return fallbackVenueId;
+
+  // Strongest signal: explicit restaurant name mention.
+  for (const venue of cached) {
+    const normalizedName = normalizeText(venue.name);
+    if (normalizedName.length >= 3 && normalizedMessage.includes(normalizedName)) {
+      return venue.venue_id;
+    }
+  }
+
+  // Secondary signal: "first/second/3rd one"
+  const idx = ordinalToIndex(normalizedMessage);
+  if (idx !== null && idx >= 0 && idx < cached.length) {
+    return cached[idx].venue_id;
+  }
+
+  return fallbackVenueId;
+}
 
 export type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
 export type ReactionType = StandardReactionType | 'custom';
@@ -534,6 +589,10 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
           try {
             const geo = input.lat && input.lng ? { lat: input.lat, lng: input.lng } : undefined;
             const results = await searchRestaurants(resyAuthToken!, input.query, geo);
+            recentVenueOptionsByChat.set(
+              chatId,
+              results.slice(0, MAX_CACHED_VENUES).map(r => ({ venue_id: r.venue_id, name: r.name })),
+            );
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(results) });
           } catch (error) {
             const msg = error instanceof Error ? error.message : 'Unknown error';
@@ -544,8 +603,12 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
         } else if (block.name === 'resy_find_slots') {
           const input = block.input as { venue_id: number; date: string; party_size: number; lat?: number; lng?: number };
           try {
+            const resolvedVenueId = resolveVenueFromSelection(chatId, userMessage, input.venue_id);
+            if (resolvedVenueId !== input.venue_id) {
+              console.log(`[claude] Resolved venue for slots: ${input.venue_id} -> ${resolvedVenueId} from user selection`);
+            }
             const geo = input.lat && input.lng ? { lat: input.lat, lng: input.lng } : undefined;
-            const slots = await findSlots(resyAuthToken!, input.venue_id, input.date, input.party_size, geo);
+            const slots = await findSlots(resyAuthToken!, resolvedVenueId, input.date, input.party_size, geo);
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(slots) });
           } catch (error) {
             const msg = error instanceof Error ? error.message : 'Unknown error';
@@ -556,7 +619,11 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
         } else if (block.name === 'resy_book') {
           const input = block.input as { venue_id: number; date: string; party_size: number; time?: string };
           try {
-            const confirmation = await bookReservation(resyAuthToken!, input.venue_id, input.date, input.party_size, input.time);
+            const resolvedVenueId = resolveVenueFromSelection(chatId, userMessage, input.venue_id);
+            if (resolvedVenueId !== input.venue_id) {
+              console.log(`[claude] Resolved venue for booking: ${input.venue_id} -> ${resolvedVenueId} from user selection`);
+            }
+            const confirmation = await bookReservation(resyAuthToken!, resolvedVenueId, input.date, input.party_size, input.time);
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(confirmation) });
             bookingSucceeded = true;
           } catch (error) {
