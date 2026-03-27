@@ -5,6 +5,7 @@ type StorageSk =
   | 'CREDENTIALS'
   | 'SIGNED_OUT'
   | 'JUST_ONBOARDED'
+  | 'PROFILE_ONBOARDING'
   | 'PENDING_OTP'
   | 'PENDING_CHALLENGE'
   | 'AUTHTOKEN'
@@ -17,6 +18,7 @@ const EXPIRY_COLUMNS: Record<StorageSk, string | null> = {
   CREDENTIALS: null,
   SIGNED_OUT: null,
   JUST_ONBOARDED: 'expires_at',
+  PROFILE_ONBOARDING: null,
   PENDING_OTP: 'expires_at',
   PENDING_CHALLENGE: 'expires_at',
   AUTHTOKEN: 'expires_at',
@@ -143,6 +145,26 @@ export async function getItem<T>(pk: string, sk: string): Promise<T | null> {
         if (!data) return null;
         if (isExpired(data.expires_at, now)) return null;
         return {} as T;
+      }
+
+      case 'PROFILE_ONBOARDING': {
+        const { data, error } = await client
+          .from('agent_profile_onboarding')
+          .select('stage,name,city,neighborhood,dietary,completed,updated_at')
+          .eq('phone_number', phoneNumber)
+          .single();
+        if (error && error.code === 'PGRST116') return null;
+        if (error) throw error;
+        if (!data) return null;
+        return {
+          stage: data.stage,
+          name: data.name,
+          city: data.city,
+          neighborhood: data.neighborhood,
+          dietary: data.dietary,
+          completed: data.completed,
+          updatedAt: normalizeIso(data.updated_at),
+        } as T;
       }
 
       case 'PENDING_OTP': {
@@ -321,6 +343,11 @@ export async function putItem(
         );
         return;
       }
+      case 'PROFILE_ONBOARDING': {
+        const row = mapKeysToSnake({ ...data, phoneNumber });
+        await upsert('agent_profile_onboarding', row, 'phone_number');
+        return;
+      }
       case 'PENDING_OTP': {
         const row = mapKeysToSnake({ ...data, phoneNumber });
         if (ttlExpiresAt) row.expires_at = ttlExpiresAt;
@@ -396,6 +423,9 @@ export async function deleteItem(pk: string, sk: string): Promise<void> {
         return;
       case 'JUST_ONBOARDED':
         await client.from('agent_just_onboarded').delete().eq('phone_number', phoneNumber);
+        return;
+      case 'PROFILE_ONBOARDING':
+        await client.from('agent_profile_onboarding').delete().eq('phone_number', phoneNumber);
         return;
       case 'PENDING_OTP':
         await client.from('agent_pending_otp').delete().eq('phone_number', phoneNumber);
@@ -477,7 +507,7 @@ export async function queryByPk<T>(pk: string): Promise<T[]> {
   if (parsed.entity === 'user') {
     const phoneNumber = parsed.id;
     // Match the DynamoDB single-table design: multiple SK records can share the same PK.
-    const mapping: Array<StorageSk> = ['PROFILE', 'CREDENTIALS', 'SIGNED_OUT', 'JUST_ONBOARDED', 'PENDING_OTP', 'PENDING_CHALLENGE'];
+    const mapping: Array<StorageSk> = ['PROFILE', 'CREDENTIALS', 'SIGNED_OUT', 'JUST_ONBOARDED', 'PROFILE_ONBOARDING', 'PENDING_OTP', 'PENDING_CHALLENGE'];
     for (const sk of mapping) {
       const v = await getItem<Record<string, unknown>>(pk, sk);
       if (v) items.push({ PK: `USER#${phoneNumber}`, SK: sk, ...(v as Record<string, unknown>) } as unknown as T);
