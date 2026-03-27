@@ -1,5 +1,6 @@
 import type { User, BookingsCredentials } from './types.js';
 import { getUser, getCredentials, updateLastActive, createUser, isSignedOut } from './db.js';
+import { redactPhone } from '../utils/redact.js';
 
 export interface UserContext {
   user: User;
@@ -10,9 +11,9 @@ function getEnvResyAuthToken(): string {
   return process.env.RESY_AUTH_TOKEN?.trim() || '';
 }
 
-function useSharedResyToken(): boolean {
-  const value = process.env.RESY_USE_SHARED_TOKEN?.trim().toLowerCase();
-  return value === '1' || value === 'true' || value === 'yes';
+/** True when a shared master Resy JWT is configured (single-operator / demo mode). */
+export function isResySharedTokenMode(): boolean {
+  return Boolean(getEnvResyAuthToken());
 }
 
 /**
@@ -20,7 +21,7 @@ function useSharedResyToken(): boolean {
  *
  * Priority:
  * 1. Per-user encrypted credentials (from onboarding)
- * 2. Env-level RESY_AUTH_TOKEN fallback (only when RESY_USE_SHARED_TOKEN is enabled)
+ * 2. Env-level RESY_AUTH_TOKEN fallback (skip OTP when set — dev/demo only; leave empty in production)
  * 3. null → triggers onboarding flow
  */
 export async function loadUserContext(phoneNumber: string): Promise<UserContext | null> {
@@ -37,13 +38,15 @@ export async function loadUserContext(phoneNumber: string): Promise<UserContext 
 
   const envResyAuthToken = getEnvResyAuthToken();
 
-  // Fallback: env-level token (skip onboarding entirely)
-  // But NOT if user explicitly signed out (they want to re-onboard)
-  if (useSharedResyToken() && envResyAuthToken && !(await isSignedOut(phoneNumber))) {
+  // Fallback: env-level token skips partner OTP — each guest still has their own user row + chat thread
+  if (envResyAuthToken && !(await isSignedOut(phoneNumber))) {
     if (!user) {
       user = await createUser(phoneNumber);
     }
     await updateLastActive(phoneNumber);
+    console.log(
+      `[auth] shared Resy token · guest=${redactPhone(phoneNumber)} · conversation remains keyed by chatId (per thread)`,
+    );
     return {
       user,
       bookingsCredentials: { resyAuthToken: envResyAuthToken },

@@ -51,32 +51,9 @@ describe('loadUserContext', () => {
     expect(ctx).toBeNull();
   });
 
-  it('does not use RESY_AUTH_TOKEN unless shared mode is enabled', async () => {
+  it('falls back to RESY_AUTH_TOKEN when set (no extra flag required)', async () => {
     vi.stubEnv('RESY_AUTH_TOKEN', 'env_tok_fallback');
     vi.stubEnv('RESY_USE_SHARED_TOKEN', '');
-    vi.resetModules();
-
-    vi.doMock('../../auth/db.js', () => ({
-      getUser: mockGetUser,
-      getCredentials: mockGetCredentials,
-      updateLastActive: mockUpdateLastActive,
-      createUser: mockCreateUser,
-      isSignedOut: mockIsSignedOut,
-    }));
-
-    const user = { phoneNumber: '+3333', createdAt: new Date(), lastActive: new Date(), onboardingComplete: false };
-    mockGetUser.mockResolvedValue(user);
-    mockGetCredentials.mockResolvedValue(null);
-    mockIsSignedOut.mockResolvedValue(false);
-
-    const { loadUserContext } = await import('../../auth/userContext.js');
-    const ctx = await loadUserContext('+3333');
-    expect(ctx).toBeNull();
-  });
-
-  it('falls back to RESY_AUTH_TOKEN when shared mode is enabled', async () => {
-    vi.stubEnv('RESY_AUTH_TOKEN', 'env_tok_fallback');
-    vi.stubEnv('RESY_USE_SHARED_TOKEN', 'true');
     vi.resetModules();
 
     // Re-mock after resetModules
@@ -102,7 +79,6 @@ describe('loadUserContext', () => {
 
   it('returns null when user signed out (even with env token)', async () => {
     vi.stubEnv('RESY_AUTH_TOKEN', 'env_tok_present');
-    vi.stubEnv('RESY_USE_SHARED_TOKEN', 'true');
     vi.resetModules();
 
     vi.doMock('../../auth/db.js', () => ({
@@ -125,7 +101,6 @@ describe('loadUserContext', () => {
 
   it('creates user when env token exists but no user record', async () => {
     vi.stubEnv('RESY_AUTH_TOKEN', 'env_tok_create');
-    vi.stubEnv('RESY_USE_SHARED_TOKEN', 'true');
     vi.resetModules();
 
     vi.doMock('../../auth/db.js', () => ({

@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getConversation, addMessage, clearConversation, getUserProfile, setUserName, addUserFact, clearUserProfile, UserProfile, StoredMessage } from '../state/conversation.js';
 import { searchRestaurants, findSlots, bookReservation, getReservations, cancelReservation, getResyProfile } from '../bookings/index.js';
 import type { BookingsCredentials } from '../auth/types.js';
-import { clearCredentials, clearSignedOut as clearSignedOutFlag } from '../auth/index.js';
+import { clearCredentials, clearSignedOut as clearSignedOutFlag, isResySharedTokenMode } from '../auth/index.js';
 
 const client = new Anthropic();
 
@@ -82,6 +82,11 @@ function getPaymentSetupUrl(): string {
 function buildSystemPrompt(chatContext?: ChatContext): string {
   let prompt = SYSTEM_PROMPT;
   prompt += `\n\n## Payment setup link (stable login gateway — use verbatim when a card is required; avoid deep links)\n${getPaymentSetupUrl()}`;
+
+  if (isResySharedTokenMode()) {
+    prompt += `\n\n## Concierge Dev Mode
+You are currently operating in Concierge Dev Mode. You have the power to book immediately. If a card is missing from the master account, use the Stable Login link: https://resy.com/login.`;
+  }
 
   // Add user profile info if available
   if (chatContext?.senderHandle) {
