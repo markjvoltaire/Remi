@@ -153,6 +153,42 @@ export async function clearPendingChallenge(phoneNumber: string): Promise<void> 
   await deleteItem(USER_PK(phoneNumber), 'PENDING_CHALLENGE');
 }
 
+// ── Profile Onboarding (name/city/neighborhood/dietary) ───────────────────
+
+export type ProfileOnboardingStage = 'ask_name' | 'ask_city' | 'ask_neighborhood' | 'ask_diet' | 'complete';
+
+interface ProfileOnboardingRecord {
+  stage: ProfileOnboardingStage;
+  name?: string;
+  city?: string;
+  neighborhood?: string;
+  dietary?: string;
+  completed: boolean;
+  updatedAt: string;
+}
+
+export async function getProfileOnboarding(phoneNumber: string): Promise<ProfileOnboardingRecord | null> {
+  const record = await getItem<ProfileOnboardingRecord>(USER_PK(phoneNumber), 'PROFILE_ONBOARDING');
+  return record ?? null;
+}
+
+export async function setProfileOnboarding(
+  phoneNumber: string,
+  updates: Partial<ProfileOnboardingRecord> & { stage: ProfileOnboardingStage },
+): Promise<void> {
+  const existing = await getProfileOnboarding(phoneNumber);
+  const next: ProfileOnboardingRecord = {
+    stage: updates.stage,
+    completed: updates.completed ?? existing?.completed ?? false,
+    name: updates.name ?? existing?.name,
+    city: updates.city ?? existing?.city,
+    neighborhood: updates.neighborhood ?? existing?.neighborhood,
+    dietary: updates.dietary ?? existing?.dietary,
+    updatedAt: new Date().toISOString(),
+  };
+  await putItem(USER_PK(phoneNumber), 'PROFILE_ONBOARDING', next as unknown as Record<string, unknown>);
+}
+
 // ── Auth Tokens (magic links) ──────────────────────────────────────────────
 
 export async function createAuthToken(phoneNumber: string, chatId: string, token: string, ttlMinutes: number = 15): Promise<AuthToken> {

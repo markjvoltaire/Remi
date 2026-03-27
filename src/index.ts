@@ -4,8 +4,8 @@ import express from 'express';
 import { createWebhookHandler } from './webhook/handler.js';
 import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from './blooio/client.js';
 import { chat, getGroupChatAction, getTextForEffect } from './claude/client.js';
-import { getUserProfile, addMessage } from './state/conversation.js';
-import { authRoutes, getUser, createUser, loadUserContext, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, setCredentials, clearSignedOut } from './auth/index.js';
+import { getUserProfile, addMessage, setUserName, addUserFact } from './state/conversation.js';
+import { authRoutes, getUser, createUser, loadUserContext, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, setCredentials, clearSignedOut, getProfileOnboarding, setProfileOnboarding } from './auth/index.js';
 import { sendResyOTP, verifyResyOTP, completeResyChallenge } from './bookings/index.js';
 import { redactPhone } from './utils/redact.js';
 import { putItem } from './db/storage.js';
@@ -26,6 +26,10 @@ function cleanResponse(text: string): string {
     // Clean up extra newlines (but preserve intentional double-newlines for --- splits)
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function normalizeOnboardingAnswer(text: string): string {
+  return text.trim().replace(/\s+/g, ' ');
 }
 
 // Track message count per chat for contact card sharing (DynamoDB-backed)
@@ -117,6 +121,66 @@ app.post(
     // Determine if this is a group chat (more than 2 participants)
     const isGroupChat = chatInfo.handles.length > 2;
     const participantNames = chatInfo.handles.map(h => h.handle);
+
+    // ── Profile onboarding (name/city/neighborhood/dietary) ───────────────
+    // Run this before Resy OTP auth flow so first-time users get a conversational intro.
+    const user = await getUser(from);
+    let onboarding = await getProfileOnboarding(from);
+
+    if (!onboarding) {
+      if (!user) {
+        await createUser(from);
+      }
+      await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
+      await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await sendMessage(chatId, `whats your name?`);
+      return;
+    }
+
+    if (!onboarding.completed) {
+      const answer = normalizeOnboardingAnswer(text);
+      if (!answer) {
+        await sendMessage(chatId, `sorry, i missed that — can you send that again?`);
+        return;
+      }
+
+      if (onboarding.stage === 'ask_name') {
+        await setUserName(from, answer);
+        await setProfileOnboarding(from, { stage: 'ask_city', name: answer, completed: false });
+        await sendMessage(chatId, `good to meet you ${answer}.`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await sendMessage(chatId, `what city are you in?`);
+        return;
+      }
+
+      if (onboarding.stage === 'ask_city') {
+        await addUserFact(from, `City: ${answer}`);
+        await setProfileOnboarding(from, { stage: 'ask_neighborhood', city: answer, completed: false });
+        await sendMessage(chatId, `what part of ${answer}?`);
+        return;
+      }
+
+      if (onboarding.stage === 'ask_neighborhood') {
+        await addUserFact(from, `Neighborhood: ${answer}`);
+        await setProfileOnboarding(from, { stage: 'ask_diet', neighborhood: answer, completed: false });
+        await sendMessage(chatId, `any food you dont eat?`);
+        return;
+      }
+
+      if (onboarding.stage === 'ask_diet') {
+        const normalized = answer.toLowerCase();
+        const dietaryFact = /not really|none|nope|anything|no\b/.test(normalized)
+          ? 'Dietary restrictions: none'
+          : `Dietary restrictions: ${answer}`;
+        await addUserFact(from, dietaryFact);
+        await setProfileOnboarding(from, { stage: 'complete', dietary: answer, completed: true });
+        await sendMessage(chatId, `youre all set.`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await sendMessage(chatId, `just tell me what you need.`);
+        return;
+      }
+    }
 
     // ── Inline JWT auth: user texts their Resy token directly ─────────────
     const trimmedText = text.trim();
