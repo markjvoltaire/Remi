@@ -23,6 +23,7 @@ import {
   setCredentials, clearSignedOut,
 } from '../auth/index.js';
 import { sendResyOTP, verifyResyOTP, completeResyChallenge, registerResyUser } from '../bookings/index.js';
+import { resyLinkMessages } from '../auth/resyLinkMessages.js';
 import { redactPhone } from '../utils/redact.js';
 import { getItem, putItem } from '../db/storage.js';
 
@@ -123,9 +124,9 @@ async function processRecord(record: SQSRecord): Promise<void> {
     await setCredentials(from, { resyAuthToken: trimmedText });
     await clearSignedOut(from);
     await clearPendingOTP(from);
-    await sendMessage(chatId, `you're all set! your resy account is connected`);
+    await sendMessage(chatId, resyLinkMessages.linkedFirst);
     await new Promise(resolve => setTimeout(resolve, 800));
-    await sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings — just text me what you need`);
+    await sendMessage(chatId, resyLinkMessages.linkedSecond);
     return;
   }
 
@@ -155,19 +156,19 @@ async function processRecord(record: SQSRecord): Promise<void> {
           await setCredentials(from, { resyAuthToken: authToken });
           await clearPendingChallenge(from);
           await clearSignedOut(from);
-          await sendMessage(chatId, `you're all set! your resy account is connected`);
+          await sendMessage(chatId, resyLinkMessages.linkedFirst);
           await new Promise(resolve => setTimeout(resolve, 800));
-          await sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings — just text me what you need`);
+          await sendMessage(chatId, resyLinkMessages.linkedSecond);
           return;
         } else {
           await clearPendingChallenge(from);
-          await sendMessage(chatId, `i'm having trouble connecting your account automatically`);
+          await sendMessage(chatId, resyLinkMessages.manualConnectFirst);
           await new Promise(resolve => setTimeout(resolve, 600));
-          await sendMessage(chatId, `you can connect manually: log into resy.com, open browser dev tools (F12), go to Network tab, click any request, and copy the "x-resy-auth-token" header value — then paste it here`);
+          await sendMessage(chatId, resyLinkMessages.manualConnectSecond);
           return;
         }
       }
-      await sendMessage(chatId, `what's the email address on your resy account?`);
+      await sendMessage(chatId, resyLinkMessages.emailAskNew);
       return;
     }
 
@@ -198,16 +199,16 @@ async function processRecord(record: SQSRecord): Promise<void> {
         await setCredentials(from, { resyAuthToken: authToken });
         await clearPendingChallenge(from);
         await clearSignedOut(from);
-        await sendMessage(chatId, `you're all set! your resy account is connected`);
+        await sendMessage(chatId, resyLinkMessages.linkedFirst);
         await new Promise(resolve => setTimeout(resolve, 800));
-        await sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings — just text me what you need`);
+        await sendMessage(chatId, resyLinkMessages.linkedSecond);
         return;
       } else {
-        await sendMessage(chatId, `that email didn't match your resy account — try the email address you used to sign up for resy`);
+        await sendMessage(chatId, resyLinkMessages.emailMismatch);
         return;
       }
     }
-    await sendMessage(chatId, `i need the email address on your resy account to finish connecting — what email did you use to sign up for resy?`);
+    await sendMessage(chatId, resyLinkMessages.emailReminder);
     return;
   }
 
@@ -219,18 +220,18 @@ async function processRecord(record: SQSRecord): Promise<void> {
       const result = await verifyResyOTP(from, stripped);
 
       if (!result) {
-        await sendMessage(chatId, `that code didn't work — check the text from resy and try again`);
+        await sendMessage(chatId, resyLinkMessages.otpBad);
         return;
       }
 
       if ('error' in result) {
         console.error(`[processor] Resy server error verifying OTP for ${redactPhone(from)}`);
-        await sendMessage(chatId, `resy's servers are having issues right now — wait a minute and i'll resend a new code`);
+        await sendMessage(chatId, resyLinkMessages.otpServerBusy);
         await new Promise(resolve => setTimeout(resolve, 2000));
         const retry = await sendResyOTP(from);
         if (retry === 'sms') {
           await setPendingOTP(from, chatId);
-          await sendMessage(chatId, `just sent a new code — try again with the fresh one`);
+          await sendMessage(chatId, resyLinkMessages.otpResent);
         }
         return;
       }
@@ -240,9 +241,9 @@ async function processRecord(record: SQSRecord): Promise<void> {
         await setCredentials(from, { resyAuthToken: result.token });
         await clearPendingOTP(from);
         await clearSignedOut(from);
-        await sendMessage(chatId, `you're all set! your resy account is connected`);
+        await sendMessage(chatId, resyLinkMessages.linkedFirst);
         await new Promise(resolve => setTimeout(resolve, 800));
-        await sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings — just text me what you need`);
+        await sendMessage(chatId, resyLinkMessages.linkedSecond);
         return;
       }
 
@@ -259,14 +260,13 @@ async function processRecord(record: SQSRecord): Promise<void> {
       });
 
       if (challenge.isNewUser) {
-        await sendMessage(chatId, `almost there! i need your resy email to finish connecting — what email did you use for resy?`);
+        await sendMessage(chatId, resyLinkMessages.emailAskNew);
       } else {
-        const name = challenge.firstName ? ` ${challenge.firstName}` : '';
-        await sendMessage(chatId, `got it${name}! one more step — what's the email address on your resy account?`);
+        await sendMessage(chatId, resyLinkMessages.emailAskExisting(challenge.firstName));
       }
       return;
     }
-    await sendMessage(chatId, `i'm still waiting for your resy verification code — check your texts for a 6-digit code from resy`);
+    await sendMessage(chatId, resyLinkMessages.otpWaiting);
     return;
   }
 
@@ -281,17 +281,17 @@ async function processRecord(record: SQSRecord): Promise<void> {
     const otpResult = await sendResyOTP(from);
     if (otpResult === 'sms') {
       await setPendingOTP(from, chatId);
-      await sendMessage(chatId, `hey! i just sent a verification code to this number from resy`);
+      await sendMessage(chatId, resyLinkMessages.otpSentFirst);
       await new Promise(resolve => setTimeout(resolve, 600));
-      await sendMessage(chatId, `send me the 6-digit code to connect your account`);
+      await sendMessage(chatId, resyLinkMessages.otpSentSecond);
     } else if (otpResult === 'rate_limited') {
-      await sendMessage(chatId, `resy is temporarily blocking verification texts to your number (too many recent attempts)`);
+      await sendMessage(chatId, resyLinkMessages.rateLimitedFirst);
       await new Promise(resolve => setTimeout(resolve, 600));
-      await sendMessage(chatId, `you can connect by pasting your resy auth token directly — go to resy.com, open browser dev tools, and copy the x-resy-auth-token header value, then text it to me`);
+      await sendMessage(chatId, resyLinkMessages.rateLimitedSecond);
     } else {
-      await sendMessage(chatId, `i couldn't send a verification code to this number — make sure you have a resy account linked to this phone number`);
+      await sendMessage(chatId, resyLinkMessages.otpSendFailedFirst);
       await new Promise(resolve => setTimeout(resolve, 600));
-      await sendMessage(chatId, `alternatively, you can paste your resy auth token directly — go to resy.com, log in, open dev tools, and copy the x-resy-auth-token header from any api request`);
+      await sendMessage(chatId, resyLinkMessages.otpSendFailedSecond);
     }
     return;
   }

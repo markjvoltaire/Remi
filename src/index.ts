@@ -6,7 +6,8 @@ import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, g
 import { chat, getGroupChatAction, getTextForEffect } from './claude/client.js';
 import { getUserProfile, addMessage, setUserName, addUserFact } from './state/conversation.js';
 import { authRoutes, getUser, createUser, loadUserContext, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, setCredentials, clearSignedOut, getProfileOnboarding, setProfileOnboarding } from './auth/index.js';
-import { sendResyOTP, verifyResyOTP, completeResyChallenge } from './bookings/index.js';
+import { sendResyOTP, verifyResyOTP, completeResyChallenge, registerResyUser } from './bookings/index.js';
+import { resyLinkMessages } from './auth/resyLinkMessages.js';
 import { redactPhone } from './utils/redact.js';
 import { putItem } from './db/storage.js';
 
@@ -190,9 +191,9 @@ app.post(
       await setCredentials(from, { resyAuthToken: trimmedText });
       await clearSignedOut(from);
       await clearPendingOTP(from);
-      await sendMessage(chatId, `you're all set! your resy account is connected`);
+      await sendMessage(chatId, resyLinkMessages.linkedFirst);
       await new Promise(resolve => setTimeout(resolve, 800));
-      await sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings — just text me what you need`);
+      await sendMessage(chatId, resyLinkMessages.linkedSecond);
       console.log(`[main] JWT stored for ${redactPhone(from)}`);
       return;
     }
@@ -200,12 +201,49 @@ app.post(
     // ── Email challenge: user needs to verify email after OTP code ────────
     const pendingChallenge = await getPendingChallenge(from);
     if (pendingChallenge) {
-      const emailInput = text.trim().toLowerCase();
-      // Basic email validation
+      const input = text.trim();
+
+      if (pendingChallenge.isNewUser) {
+        const emailMatch = input.match(/[\w.+-]+@[\w.-]+\.\w+/i);
+        if (emailMatch) {
+          const email = emailMatch[0].toLowerCase();
+          console.log(`[main] No-challenge user, trying with email: ${email}`);
+
+          const authToken = await registerResyUser(
+            pendingChallenge.claimToken,
+            pendingChallenge.mobileNumber,
+            '',
+            '',
+            email,
+          );
+
+          if (authToken) {
+            if (!(await getUser(from))) await createUser(from);
+            await setCredentials(from, { resyAuthToken: authToken });
+            await clearPendingChallenge(from);
+            await clearSignedOut(from);
+            await sendMessage(chatId, resyLinkMessages.linkedFirst);
+            await new Promise(resolve => setTimeout(resolve, 800));
+            await sendMessage(chatId, resyLinkMessages.linkedSecond);
+            console.log(`[main] Challenge completed — credentials stored for ${redactPhone(from)}`);
+            return;
+          }
+
+          await clearPendingChallenge(from);
+          await sendMessage(chatId, resyLinkMessages.manualConnectFirst);
+          await new Promise(resolve => setTimeout(resolve, 600));
+          await sendMessage(chatId, resyLinkMessages.manualConnectSecond);
+          return;
+        }
+
+        await sendMessage(chatId, resyLinkMessages.emailAskNew);
+        return;
+      }
+
+      const emailInput = input.toLowerCase();
       if (emailInput.includes('@') && emailInput.includes('.')) {
         console.log(`[main] User ${redactPhone(from)} sent email for challenge verification`);
 
-        // Build field values from the challenge's required fields
         const fieldValues: Record<string, string> = {};
         for (const field of pendingChallenge.requiredFields) {
           if (field.type === 'email' || field.name === 'em_address') {
@@ -231,19 +269,19 @@ app.post(
           await clearPendingChallenge(from);
           await clearSignedOut(from);
 
-          await sendMessage(chatId, `you're all set! your resy account is connected`);
+          await sendMessage(chatId, resyLinkMessages.linkedFirst);
           await new Promise(resolve => setTimeout(resolve, 800));
-          await sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings — just text me what you need`);
+          await sendMessage(chatId, resyLinkMessages.linkedSecond);
           console.log(`[main] Challenge completed — credentials stored for ${redactPhone(from)}`);
           return;
-        } else {
-          await sendMessage(chatId, `that email didn't match your resy account — try the email address you used to sign up for resy`);
-          console.log(`[main] Challenge verification failed for ${redactPhone(from)}`);
-          return;
         }
+
+        await sendMessage(chatId, resyLinkMessages.emailMismatch);
+        console.log(`[main] Challenge verification failed for ${redactPhone(from)}`);
+        return;
       }
-      // Non-email text while challenge is pending
-      await sendMessage(chatId, `i need the email address on your resy account to finish connecting — what email did you use to sign up for resy?`);
+
+      await sendMessage(chatId, resyLinkMessages.emailReminder);
       return;
     }
 
@@ -258,7 +296,7 @@ app.post(
         const result = await verifyResyOTP(from, stripped);
 
         if (!result) {
-          await sendMessage(chatId, `that code didn't work — check the text from resy and try again`);
+          await sendMessage(chatId, resyLinkMessages.otpBad);
           console.log(`[main] OTP verification failed for ${redactPhone(from)}`);
           return;
         }
@@ -270,17 +308,27 @@ app.post(
           await clearPendingOTP(from);
           await clearSignedOut(from);
 
-          await sendMessage(chatId, `you're all set! your resy account is connected`);
+          await sendMessage(chatId, resyLinkMessages.linkedFirst);
           await new Promise(resolve => setTimeout(resolve, 800));
-          await sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings — just text me what you need`);
+          await sendMessage(chatId, resyLinkMessages.linkedSecond);
           console.log(`[main] OTP verified (direct token) — credentials stored for ${redactPhone(from)}`);
           return;
         }
 
-        if (!('challenge' in result)) {
-          // Server error (5xx) or unexpected shape
-          await sendMessage(chatId, `resy is having trouble verifying codes right now — try again in a minute`);
+        if ('error' in result) {
+          await sendMessage(chatId, resyLinkMessages.otpServerBusy);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          const retry = await sendResyOTP(from);
+          if (retry === 'sms') {
+            await setPendingOTP(from, chatId);
+            await sendMessage(chatId, resyLinkMessages.otpResent);
+          }
           console.log(`[main] OTP verification returned server error`);
+          return;
+        }
+
+        if (!('challenge' in result)) {
+          await sendMessage(chatId, resyLinkMessages.otpServerBusy);
           return;
         }
 
@@ -297,13 +345,16 @@ app.post(
           requiredFields: challenge.requiredFields,
         });
 
-        const name = challenge.firstName ? ` ${challenge.firstName}` : '';
-        await sendMessage(chatId, `got it${name}! one more step — what's the email address on your resy account?`);
+        if (challenge.isNewUser) {
+          await sendMessage(chatId, resyLinkMessages.emailAskNew);
+        } else {
+          await sendMessage(chatId, resyLinkMessages.emailAskExisting(challenge.firstName));
+        }
         console.log(`[main] OTP accepted, challenge pending (needs email) for ${redactPhone(from)}`);
         return;
       }
       // User sent non-code text while OTP is pending — remind them
-      await sendMessage(chatId, `i'm still waiting for your resy verification code — check your texts for a 6-digit code from resy`);
+      await sendMessage(chatId, resyLinkMessages.otpWaiting);
       return;
     }
 
@@ -322,21 +373,21 @@ app.post(
       const otpResult = await sendResyOTP(from);
       if (otpResult === 'sms') {
         await setPendingOTP(from, chatId);
-        await sendMessage(chatId, `hey! i just sent a verification code to this number from resy`);
+        await sendMessage(chatId, resyLinkMessages.otpSentFirst);
         await new Promise(resolve => setTimeout(resolve, 600));
-        await sendMessage(chatId, `send me the 6-digit code to connect your account`);
+        await sendMessage(chatId, resyLinkMessages.otpSentSecond);
         console.log(`[main] Sent Resy OTP to ${redactPhone(from)}`);
       } else if (otpResult === 'rate_limited') {
         // SMS rate limited — tell the user honestly and offer JWT fallback
-        await sendMessage(chatId, `resy is temporarily blocking verification texts to your number (too many recent attempts)`);
+        await sendMessage(chatId, resyLinkMessages.rateLimitedFirst);
         await new Promise(resolve => setTimeout(resolve, 600));
-        await sendMessage(chatId, `you can connect by pasting your resy auth token directly — go to resy.com, open browser dev tools, and copy the x-resy-auth-token header value, then text it to me`);
+        await sendMessage(chatId, resyLinkMessages.rateLimitedSecond);
         console.log(`[main] SMS rate limited for ${redactPhone(from)}, offered JWT fallback`);
       } else {
         // OTP failed entirely — phone might not be on Resy
-        await sendMessage(chatId, `i couldn't send a verification code to this number — make sure you have a resy account linked to this phone number`);
+        await sendMessage(chatId, resyLinkMessages.otpSendFailedFirst);
         await new Promise(resolve => setTimeout(resolve, 600));
-        await sendMessage(chatId, `alternatively, you can paste your resy auth token directly — go to resy.com, log in, open dev tools, and copy the x-resy-auth-token header from any api request`);
+        await sendMessage(chatId, resyLinkMessages.otpSendFailedSecond);
         console.log(`[main] OTP send failed for ${redactPhone(from)}`);
       }
       return;
