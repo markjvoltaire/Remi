@@ -156,14 +156,14 @@ app.post(
 
       if (onboarding.stage === 'ask_city') {
         await addUserFact(from, `City: ${answer}`);
-        await setProfileOnboarding(from, { stage: 'ask_neighborhood', city: answer, completed: false });
-        await sendMessage(chatId, `what part of ${answer}?`);
+        await setProfileOnboarding(from, { stage: 'ask_diet', city: answer, completed: false });
+        await sendMessage(chatId, `any food you dont eat?`);
         return;
       }
 
+      // Backward compatibility: users who were already in the old flow.
       if (onboarding.stage === 'ask_neighborhood') {
-        await addUserFact(from, `Neighborhood: ${answer}`);
-        await setProfileOnboarding(from, { stage: 'ask_diet', neighborhood: answer, completed: false });
+        await setProfileOnboarding(from, { stage: 'ask_diet', completed: false });
         await sendMessage(chatId, `any food you dont eat?`);
         return;
       }
