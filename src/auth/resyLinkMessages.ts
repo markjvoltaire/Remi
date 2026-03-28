@@ -35,4 +35,11 @@ export const resyLinkMessages = {
    */
   paymentFrontDesk: (url = 'https://resy.com/login') =>
     `${url} — Once you've signed in at the front desk, please tap your profile icon to add a payment method—I'll be standing by to confirm the second it's added.`,
+
+  /** Right after Resy account is linked, if /2/user shows no saved card */
+  paymentCardNeededFirst:
+    "We're close — your Resy account is linked, but our partner still needs a card on file before I can hold a table for you.",
+
+  paymentCardNeededSecond: (url: string) =>
+    `No worries — you only do this once. Head to Resy, sign in, and add a payment method under your profile. After that, bookings stay seamless. Here's the stable sign-in link: ${url}`,
 } as const;

@@ -21,6 +21,9 @@ import {
   setPendingOTP, getPendingOTP, clearPendingOTP,
   setPendingChallenge, getPendingChallenge, clearPendingChallenge,
   setCredentials, clearSignedOut,
+  deliverMagicLinkOnboarding,
+  isMagicLinkOnboardingEnabled,
+  afterResyCredentialsLinked,
 } from '../auth/index.js';
 import {
   sendResyOTP,
@@ -135,6 +138,12 @@ async function processRecord(record: SQSRecord): Promise<void> {
     await sendMessage(chatId, resyLinkMessages.linkedFirst);
     await new Promise(resolve => setTimeout(resolve, 800));
     await sendMessage(chatId, resyLinkMessages.linkedSecond);
+    await afterResyCredentialsLinked({
+      phoneNumber: from,
+      chatId,
+      resyAuthToken: trimmedText,
+      sendMessage: (c, t) => sendMessage(c, t),
+    });
     return;
   }
 
@@ -167,6 +176,12 @@ async function processRecord(record: SQSRecord): Promise<void> {
           await sendMessage(chatId, resyLinkMessages.linkedFirst);
           await new Promise(resolve => setTimeout(resolve, 800));
           await sendMessage(chatId, resyLinkMessages.linkedSecond);
+          await afterResyCredentialsLinked({
+            phoneNumber: from,
+            chatId,
+            resyAuthToken: authToken,
+            sendMessage: (c, t) => sendMessage(c, t),
+          });
           return;
         } else {
           await clearPendingChallenge(from);
@@ -210,6 +225,12 @@ async function processRecord(record: SQSRecord): Promise<void> {
         await sendMessage(chatId, resyLinkMessages.linkedFirst);
         await new Promise(resolve => setTimeout(resolve, 800));
         await sendMessage(chatId, resyLinkMessages.linkedSecond);
+        await afterResyCredentialsLinked({
+          phoneNumber: from,
+          chatId,
+          resyAuthToken: authToken,
+          sendMessage: (c, t) => sendMessage(c, t),
+        });
         return;
       } else {
         await sendMessage(chatId, resyLinkMessages.emailMismatch);
@@ -252,6 +273,12 @@ async function processRecord(record: SQSRecord): Promise<void> {
         await sendMessage(chatId, resyLinkMessages.linkedFirst);
         await new Promise(resolve => setTimeout(resolve, 800));
         await sendMessage(chatId, resyLinkMessages.linkedSecond);
+        await afterResyCredentialsLinked({
+          phoneNumber: from,
+          chatId,
+          resyAuthToken: result.token,
+          sendMessage: (c, t) => sendMessage(c, t),
+        });
         return;
       }
 
@@ -289,6 +316,15 @@ async function processRecord(record: SQSRecord): Promise<void> {
     const inbound = text.trim();
     if (inbound) {
       await addMessage(chatId, 'user', inbound, from);
+    }
+
+    if (isMagicLinkOnboardingEnabled()) {
+      const magicOk = await deliverMagicLinkOnboarding(chatId, from, msg => sendMessage(chatId, msg));
+      if (magicOk) {
+        console.log(`[processor] Sent magic link onboarding to ${redactPhone(from)}`);
+        return;
+      }
+      console.warn(`[processor] Magic link failed — falling back to SMS OTP for ${redactPhone(from)}`);
     }
 
     const otpResult = await sendResyOTP(from);

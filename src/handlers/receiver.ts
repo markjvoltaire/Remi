@@ -21,6 +21,7 @@ import type { WebhookEvent } from '../webhook/types.js';
 import { verifyAuthToken, getAuthTokenChatId } from '../auth/db.js';
 import { verifyMagicLinkToken } from '../auth/magicLink.js';
 import { setCredentials, createUser, getUser } from '../auth/db.js';
+import { afterResyCredentialsLinked } from '../auth/afterResyLink.js';
 import { sendMessage, verifyWebhookSignature } from '../blooio/client.js';
 import { redactPhone } from '../utils/redact.js';
 
@@ -203,6 +204,14 @@ async function handleAuthSubmit(event: APIGatewayProxyEventV2): Promise<APIGatew
     sendMessage(chatId, `youre all set! your resy account is connected`)
       .then(() => new Promise(resolve => setTimeout(resolve, 800)))
       .then(() => sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings on resy — just text me what you need`))
+      .then(() =>
+        afterResyCredentialsLinked({
+          phoneNumber,
+          chatId,
+          resyAuthToken: trimmed,
+          sendMessage,
+        }),
+      )
       .then(() => console.log(`[auth] Welcome messages sent`))
       .catch(err => console.error(`[auth] Failed to send welcome message:`, err));
   }

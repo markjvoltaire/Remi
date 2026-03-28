@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { verifyAuthToken, getAuthTokenChatId } from './db.js';
 import { verifyMagicLinkToken } from './magicLink.js';
 import { setCredentials, createUser, getUser } from './db.js';
+import { afterResyCredentialsLinked } from './afterResyLink.js';
 import { sendMessage } from '../blooio/client.js';
 import { redactPhone } from '../utils/redact.js';
 
@@ -150,6 +151,14 @@ authRoutes.post('/auth/setup/submit', rateLimit(RATE_LIMIT_MAX_SUBMIT), async (r
         return new Promise(resolve => setTimeout(resolve, delay));
       })
       .then(() => sendMessage(chatId, `i can search restaurants, find open tables, make reservations, and manage your bookings on resy — just text me what you need`))
+      .then(() =>
+        afterResyCredentialsLinked({
+          phoneNumber,
+          chatId,
+          resyAuthToken: trimmedToken,
+          sendMessage,
+        }),
+      )
       .then(() => console.log(`[auth] Welcome messages sent to ${redactPhone(phoneNumber)}`))
       .catch(err => console.error(`[auth] Failed to send welcome message:`, err));
   }

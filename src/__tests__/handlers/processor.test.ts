@@ -66,6 +66,9 @@ const mockGetPendingChallenge = vi.fn().mockResolvedValue(null);
 const mockClearPendingChallenge = vi.fn().mockResolvedValue(undefined);
 const mockSetCredentials = vi.fn().mockResolvedValue(undefined);
 const mockClearSignedOut = vi.fn().mockResolvedValue(undefined);
+const mockDeliverMagicLinkOnboarding = vi.fn().mockResolvedValue(true);
+const mockIsMagicLinkOnboardingEnabled = vi.fn().mockReturnValue(false);
+const mockAfterResyCredentialsLinked = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('../../auth/index.js', () => ({
   getUser: (...args: unknown[]) => mockGetUser(...args),
@@ -80,6 +83,9 @@ vi.mock('../../auth/index.js', () => ({
   clearPendingChallenge: (...args: unknown[]) => mockClearPendingChallenge(...args),
   setCredentials: (...args: unknown[]) => mockSetCredentials(...args),
   clearSignedOut: (...args: unknown[]) => mockClearSignedOut(...args),
+  deliverMagicLinkOnboarding: (...args: unknown[]) => mockDeliverMagicLinkOnboarding(...args),
+  isMagicLinkOnboardingEnabled: (...args: unknown[]) => mockIsMagicLinkOnboardingEnabled(...args),
+  afterResyCredentialsLinked: (...args: unknown[]) => mockAfterResyCredentialsLinked(...args),
 }));
 
 const mockSendResyOTP = vi.fn().mockResolvedValue('sms');
@@ -191,6 +197,9 @@ beforeEach(() => {
     fingerprint: '1',
   });
   mockRecordPaymentSnapshotTransition.mockReturnValue({ paymentBecameAvailable: false });
+  mockDeliverMagicLinkOnboarding.mockResolvedValue(true);
+  mockIsMagicLinkOnboardingEnabled.mockReturnValue(false);
+  mockAfterResyCredentialsLinked.mockResolvedValue(undefined);
 });
 
 describe('processor handler', () => {
@@ -231,7 +240,7 @@ describe('processor handler', () => {
     expect(mockSetCredentials).toHaveBeenCalledWith('+14155551234', { resyAuthToken: 'resy_tok_from_challenge' });
   });
 
-  it('unauthenticated user triggers OTP send', async () => {
+  it('unauthenticated user triggers SMS OTP by default', async () => {
     mockLoadUserContext.mockResolvedValue(null);
     mockGetUser.mockResolvedValue(null);
     mockSendResyOTP.mockResolvedValue('sms');
@@ -239,6 +248,38 @@ describe('processor handler', () => {
     await handler(makeSQSEvent('find me a restaurant'), dummyContext, () => {});
 
     expect(mockAddMessage).toHaveBeenCalledWith('chat_1', 'user', 'find me a restaurant', '+14155551234');
+    expect(mockDeliverMagicLinkOnboarding).not.toHaveBeenCalled();
+    expect(mockSendResyOTP).toHaveBeenCalledWith('+14155551234');
+    expect(mockSetPendingOTP).toHaveBeenCalled();
+  });
+
+  it('unauthenticated user gets magic link when REM_MAGIC_LINK_ONBOARDING is enabled', async () => {
+    mockIsMagicLinkOnboardingEnabled.mockReturnValue(true);
+    mockLoadUserContext.mockResolvedValue(null);
+    mockGetUser.mockResolvedValue(null);
+    mockSendResyOTP.mockResolvedValue('sms');
+
+    await handler(makeSQSEvent('find me a restaurant'), dummyContext, () => {});
+
+    expect(mockDeliverMagicLinkOnboarding).toHaveBeenCalledWith(
+      'chat_1',
+      '+14155551234',
+      expect.any(Function),
+    );
+    expect(mockSendResyOTP).not.toHaveBeenCalled();
+    expect(mockSetPendingOTP).not.toHaveBeenCalled();
+  });
+
+  it('unauthenticated user falls back to SMS when magic link delivery fails', async () => {
+    mockIsMagicLinkOnboardingEnabled.mockReturnValue(true);
+    mockDeliverMagicLinkOnboarding.mockResolvedValue(false);
+    mockLoadUserContext.mockResolvedValue(null);
+    mockGetUser.mockResolvedValue(null);
+    mockSendResyOTP.mockResolvedValue('sms');
+
+    await handler(makeSQSEvent('hello'), dummyContext, () => {});
+
+    expect(mockDeliverMagicLinkOnboarding).toHaveBeenCalled();
     expect(mockSendResyOTP).toHaveBeenCalledWith('+14155551234');
     expect(mockSetPendingOTP).toHaveBeenCalled();
   });

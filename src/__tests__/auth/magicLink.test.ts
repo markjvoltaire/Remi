@@ -10,7 +10,7 @@ vi.mock('../../auth/db.js', () => ({
   markAuthTokenUsed: (...args: unknown[]) => mockMarkAuthTokenUsed(...args),
 }));
 
-import { generateMagicLink, verifyMagicLinkToken } from '../../auth/magicLink.js';
+import { generateMagicLink, verifyMagicLinkToken, deliverMagicLinkOnboarding } from '../../auth/magicLink.js';
 
 beforeEach(() => {
   mockCreateAuthToken.mockReset();
@@ -51,6 +51,28 @@ describe('magicLink', () => {
     const result = await verifyMagicLinkToken('bad_token');
     expect(result).toBeNull();
     expect(mockMarkAuthTokenUsed).not.toHaveBeenCalled();
+  });
+
+  it('deliverMagicLinkOnboarding sends segmented bubbles and includes setup URL', async () => {
+    vi.stubEnv('BASE_URL', 'https://remi.example');
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
+    mockCreateAuthToken.mockResolvedValue({
+      token: 'generated_token',
+      phoneNumber: '+1111',
+      chatId: 'chat_1',
+      createdAt: new Date(),
+      expiresAt: expires,
+      used: false,
+    });
+
+    const bubbles: string[] = [];
+    const ok = await deliverMagicLinkOnboarding('chat_1', '+1111', async (t) => {
+      bubbles.push(t);
+    });
+
+    expect(ok).toBe(true);
+    expect(bubbles.length).toBeGreaterThanOrEqual(2);
+    expect(bubbles.some(b => b.includes('https://remi.example/auth/setup?token='))).toBe(true);
   });
 
   it('token is burned after verification (cannot reuse)', async () => {

@@ -5,7 +5,26 @@ import { createWebhookHandler } from './webhook/handler.js';
 import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from './blooio/client.js';
 import { chat, getGroupChatAction, getTextForEffect } from './claude/client.js';
 import { getUserProfile, addMessage, setUserName, addUserFact } from './state/conversation.js';
-import { authRoutes, getUser, createUser, loadUserContext, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, setCredentials, clearSignedOut, getProfileOnboarding, setProfileOnboarding } from './auth/index.js';
+import {
+  authRoutes,
+  getUser,
+  createUser,
+  loadUserContext,
+  consumeJustOnboarded,
+  setPendingOTP,
+  getPendingOTP,
+  clearPendingOTP,
+  setPendingChallenge,
+  getPendingChallenge,
+  clearPendingChallenge,
+  setCredentials,
+  clearSignedOut,
+  getProfileOnboarding,
+  setProfileOnboarding,
+  deliverMagicLinkOnboarding,
+  isMagicLinkOnboardingEnabled,
+  afterResyCredentialsLinked,
+} from './auth/index.js';
 import {
   sendResyOTP,
   verifyResyOTP,
@@ -202,6 +221,12 @@ app.post(
       await sendMessage(chatId, resyLinkMessages.linkedFirst);
       await new Promise(resolve => setTimeout(resolve, 800));
       await sendMessage(chatId, resyLinkMessages.linkedSecond);
+      await afterResyCredentialsLinked({
+        phoneNumber: from,
+        chatId,
+        resyAuthToken: trimmedText,
+        sendMessage: (c, t) => sendMessage(c, t),
+      });
       console.log(`[main] JWT stored for ${redactPhone(from)}`);
       return;
     }
@@ -233,6 +258,12 @@ app.post(
             await sendMessage(chatId, resyLinkMessages.linkedFirst);
             await new Promise(resolve => setTimeout(resolve, 800));
             await sendMessage(chatId, resyLinkMessages.linkedSecond);
+            await afterResyCredentialsLinked({
+              phoneNumber: from,
+              chatId,
+              resyAuthToken: authToken,
+              sendMessage: (c, t) => sendMessage(c, t),
+            });
             console.log(`[main] Challenge completed — credentials stored for ${redactPhone(from)}`);
             return;
           }
@@ -280,6 +311,12 @@ app.post(
           await sendMessage(chatId, resyLinkMessages.linkedFirst);
           await new Promise(resolve => setTimeout(resolve, 800));
           await sendMessage(chatId, resyLinkMessages.linkedSecond);
+          await afterResyCredentialsLinked({
+            phoneNumber: from,
+            chatId,
+            resyAuthToken: authToken,
+            sendMessage: (c, t) => sendMessage(c, t),
+          });
           console.log(`[main] Challenge completed — credentials stored for ${redactPhone(from)}`);
           return;
         }
@@ -319,6 +356,12 @@ app.post(
           await sendMessage(chatId, resyLinkMessages.linkedFirst);
           await new Promise(resolve => setTimeout(resolve, 800));
           await sendMessage(chatId, resyLinkMessages.linkedSecond);
+          await afterResyCredentialsLinked({
+            phoneNumber: from,
+            chatId,
+            resyAuthToken: result.token,
+            sendMessage: (c, t) => sendMessage(c, t),
+          });
           console.log(`[main] OTP verified (direct token) — credentials stored for ${redactPhone(from)}`);
           return;
         }
@@ -369,7 +412,7 @@ app.post(
     // ── Auth check: ensure user has Bookings credentials ──────────────────
     const userCtx = await loadUserContext(from);
     if (!userCtx) {
-      // New user or incomplete onboarding — send Resy SMS OTP
+      // New user or incomplete onboarding — magic link (default) or Resy SMS OTP
       if (!(await getUser(from))) {
         await createUser(from);
         console.log(`[main] New user: ${redactPhone(from)}`);
@@ -383,7 +426,15 @@ app.post(
         await addMessage(chatId, 'user', inbound, from);
       }
 
-      // Send SMS OTP
+      if (isMagicLinkOnboardingEnabled()) {
+        const magicOk = await deliverMagicLinkOnboarding(chatId, from, msg => sendMessage(chatId, msg));
+        if (magicOk) {
+          console.log(`[main] Sent magic link onboarding to ${redactPhone(from)}`);
+          return;
+        }
+        console.warn(`[main] Magic link failed — falling back to SMS OTP for ${redactPhone(from)}`);
+      }
+
       const otpResult = await sendResyOTP(from);
       if (otpResult === 'sms') {
         await setPendingOTP(from, chatId);
@@ -392,13 +443,11 @@ app.post(
         await sendMessage(chatId, resyLinkMessages.otpSentSecond);
         console.log(`[main] Sent Resy OTP to ${redactPhone(from)}`);
       } else if (otpResult === 'rate_limited') {
-        // SMS rate limited — tell the user honestly and offer JWT fallback
         await sendMessage(chatId, resyLinkMessages.rateLimitedFirst);
         await new Promise(resolve => setTimeout(resolve, 600));
         await sendMessage(chatId, resyLinkMessages.rateLimitedSecond);
         console.log(`[main] SMS rate limited for ${redactPhone(from)}, offered JWT fallback`);
       } else {
-        // OTP failed entirely — phone might not be on Resy
         await sendMessage(chatId, resyLinkMessages.otpSendFailedFirst);
         await new Promise(resolve => setTimeout(resolve, 600));
         await sendMessage(chatId, resyLinkMessages.otpSendFailedSecond);
