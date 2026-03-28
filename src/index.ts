@@ -21,8 +21,6 @@ import {
   clearSignedOut,
   getProfileOnboarding,
   setProfileOnboarding,
-  deliverMagicLinkOnboarding,
-  isMagicLinkOnboardingEnabled,
   afterResyCredentialsLinked,
 } from './auth/index.js';
 import {
@@ -409,49 +407,38 @@ app.post(
       return;
     }
 
-    // ── Auth check: ensure user has Bookings credentials ──────────────────
+    // ── Auth check ────────────────────────────────────────────────────────
+    // With house account fallback, loadUserContext returns null ONLY when
+    // RESY_AUTH_TOKEN is unset AND the user has no personal credentials.
     const userCtx = await loadUserContext(from);
     if (!userCtx) {
-      // New user or incomplete onboarding — magic link (default) or Resy SMS OTP
+      // No house account configured and no personal credentials — cannot book
       if (!(await getUser(from))) {
         await createUser(from);
-        console.log(`[main] New user: ${redactPhone(from)}`);
-      } else {
-        console.log(`[main] User ${redactPhone(from)} exists but no credentials`);
+        console.log(`[main] New user (no house account available): ${redactPhone(from)}`);
       }
+      await sendMessage(chatId, `hey, i'm having trouble connecting to our reservation system right now. sit tight — i'll sort it out.`);
+      console.log(`[main] No Resy credentials and no house account for ${redactPhone(from)}`);
+      return;
+    }
 
-      // Preserve guest intent in thread so Remi can pick up after partner verification
-      const inbound = text.trim();
-      if (inbound) {
-        await addMessage(chatId, 'user', inbound, from);
-      }
+    // ── Opt-in Resy account linking ─────────────────────────────────────
+    // Users on the house account can explicitly link their own Resy account
+    const wantsToLink = /\b(link|connect|pair|attach)\b.*\b(resy|account|reservation)\b/i.test(text)
+      || /\b(resy|account|reservation)\b.*\b(link|connect|pair|attach)\b/i.test(text);
 
-      if (isMagicLinkOnboardingEnabled()) {
-        const magicOk = await deliverMagicLinkOnboarding(chatId, from, msg => sendMessage(chatId, msg));
-        if (magicOk) {
-          console.log(`[main] Sent magic link onboarding to ${redactPhone(from)}`);
-          return;
-        }
-        console.warn(`[main] Magic link failed — falling back to SMS OTP for ${redactPhone(from)}`);
-      }
-
+    if (wantsToLink && userCtx.isHouseAccount) {
       const otpResult = await sendResyOTP(from);
       if (otpResult === 'sms') {
         await setPendingOTP(from, chatId);
         await sendMessage(chatId, resyLinkMessages.otpSentFirst);
         await new Promise(resolve => setTimeout(resolve, 600));
         await sendMessage(chatId, resyLinkMessages.otpSentSecond);
-        console.log(`[main] Sent Resy OTP to ${redactPhone(from)}`);
+        console.log(`[main] User requested Resy link — sent OTP to ${redactPhone(from)}`);
       } else if (otpResult === 'rate_limited') {
-        await sendMessage(chatId, resyLinkMessages.rateLimitedFirst);
-        await new Promise(resolve => setTimeout(resolve, 600));
-        await sendMessage(chatId, resyLinkMessages.rateLimitedSecond);
-        console.log(`[main] SMS rate limited for ${redactPhone(from)}, offered JWT fallback`);
+        await sendMessage(chatId, `verification texts are limited right now — try again in a few minutes.`);
       } else {
-        await sendMessage(chatId, resyLinkMessages.otpSendFailedFirst);
-        await new Promise(resolve => setTimeout(resolve, 600));
-        await sendMessage(chatId, resyLinkMessages.otpSendFailedSecond);
-        console.log(`[main] OTP send failed for ${redactPhone(from)}`);
+        await sendMessage(chatId, `i couldn't send a verification code to this number. you can still book through me — i'll handle everything.`);
       }
       return;
     }
@@ -496,7 +483,8 @@ app.post(
     let hasPaymentMethod: boolean | undefined;
     let paymentBecameAvailable = false;
     const resyToken = userCtx.bookingsCredentials?.resyAuthToken;
-    if (resyToken && messageSuggestsBookingIntent(text)) {
+    // Only check per-user payment status for linked accounts (house account has its own card)
+    if (resyToken && !userCtx.isHouseAccount && messageSuggestsBookingIntent(text)) {
       try {
         const payStatus = await verifyPaymentStatus(resyToken);
         const snap = recordPaymentSnapshotTransition(from, payStatus);
@@ -520,6 +508,7 @@ app.post(
       justOnboarded,
       hasPaymentMethod,
       paymentBecameAvailable,
+      isHouseAccount: userCtx.isHouseAccount,
     });
     console.log(`[timing] claude: ${Date.now() - start}ms`);
     console.log(`[debug] responseText: ${responseText ? `"${responseText.substring(0, 50)}..."` : 'null'}, effect: ${effect ? JSON.stringify(effect) : 'null'}, renameChat: ${renameChat || 'null'}`);

@@ -5,6 +5,8 @@ import { redactPhone } from '../utils/redact.js';
 export interface UserContext {
   user: User;
   bookingsCredentials: BookingsCredentials;
+  /** True when using the house/shared Resy account instead of the user's own linked account. */
+  isHouseAccount: boolean;
 }
 
 function getEnvResyAuthToken(): string {
@@ -32,24 +34,25 @@ export async function loadUserContext(phoneNumber: string): Promise<UserContext 
     const creds = await getCredentials(phoneNumber);
     if (creds) {
       await updateLastActive(phoneNumber);
-      return { user, bookingsCredentials: creds };
+      return { user, bookingsCredentials: creds, isHouseAccount: false };
     }
   }
 
   const envResyAuthToken = getEnvResyAuthToken();
 
-  // Fallback: env-level token skips partner OTP — each guest still has their own user row + chat thread
+  // Fallback: house account token — lets unlinked users book immediately
   if (envResyAuthToken && !(await isSignedOut(phoneNumber))) {
     if (!user) {
       user = await createUser(phoneNumber);
     }
     await updateLastActive(phoneNumber);
     console.log(
-      `[auth] shared Resy token · guest=${redactPhone(phoneNumber)} · conversation remains keyed by chatId (per thread)`,
+      `[auth] house account · guest=${redactPhone(phoneNumber)} · booking via shared Resy token`,
     );
     return {
       user,
       bookingsCredentials: { resyAuthToken: envResyAuthToken },
+      isHouseAccount: true,
     };
   }
 

@@ -83,9 +83,19 @@ function buildSystemPrompt(chatContext?: ChatContext): string {
   let prompt = SYSTEM_PROMPT;
   prompt += `\n\n## Payment setup link (stable login gateway — use verbatim when a card is required; avoid deep links)\n${getPaymentSetupUrl()}`;
 
-  if (isResySharedTokenMode()) {
-    prompt += `\n\n## Concierge Dev Mode
-You are currently operating in Concierge Dev Mode. You have the power to book immediately. If a card is missing from the master account, use the Stable Login link: https://resy.com/login.`;
+  if (chatContext?.isHouseAccount) {
+    prompt += `\n\n## House Account Mode
+This guest has NOT linked their own Resy account. You are booking on their behalf using the house account. This means:
+- You CAN search restaurants, check availability, and make bookings — do it seamlessly.
+- Reservations, profile, and cancellations will reflect the house account, not the guest's personal Resy.
+- Do NOT mention "house account" or "shared account" to the guest. Just book naturally.
+- After a successful booking, gently suggest they can link their own Resy account for personal management: "if you ever want to manage reservations directly, just text 'link my resy' and I'll set that up."
+- If the guest explicitly asks to link their Resy account (e.g. "link my resy", "connect my account"), tell them you'll get that set up and that they'll receive a verification code shortly. The system will handle the OTP flow.
+
+**Context override:** The "Partner verification (Ghost Onboarding)" section above describes SMS verification before some guests message you — **it does not apply to this thread** unless they choose to link their own account. This guest may book with you without prior partner verification. Do not imply they already completed a verification code unless they actually went through linking.`;
+  } else if (isResySharedTokenMode() && !chatContext?.isHouseAccount) {
+    prompt += `\n\n## Linked Account
+This guest has their own Resy account linked. Full access to their reservations, profile, and bookings.`;
   }
 
   // Add user profile info if available
@@ -481,6 +491,8 @@ export interface ChatContext {
   hasPaymentMethod?: boolean;
   /** True when the guest went from no saved partner card to having one since the last snapshot. */
   paymentBecameAvailable?: boolean;
+  /** True when using the house/shared Resy account instead of the user's own linked account. */
+  isHouseAccount?: boolean;
 }
 
 /**
@@ -527,6 +539,14 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
     return { text: "hmm couldnt figure out who you are to forget you", ...emptyResponse };
   }
 
+  if (cmd === '/bookings' && chatContext?.isHouseAccount) {
+    await addMessage(chatId, 'user', userMessage.trim(), chatContext?.senderHandle);
+    return {
+      text: "to see your personal reservations here, link your own resy — just text 'link my resy'. until then i can still find tables and book for you whenever you like.",
+      ...emptyResponse,
+    };
+  }
+
   // Per-user Resy auth token
   const resyAuthToken = chatContext?.bookingsCredentials?.resyAuthToken ?? null;
 
@@ -563,13 +583,18 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
       REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, WEB_SEARCH_TOOL,
     ];
     if (resyAuthToken) {
-      tools.push(
-        RESY_SEARCH_TOOL, RESY_FIND_SLOTS_TOOL,
-        RESY_BOOK_TOOL, RESY_CANCEL_TOOL,
-        RESY_RESERVATIONS_TOOL,
-        RESY_PROFILE_TOOL,
-        RESY_SIGN_OUT_TOOL,
-      );
+      // All users get search, slots, and booking tools
+      tools.push(RESY_SEARCH_TOOL, RESY_FIND_SLOTS_TOOL, RESY_BOOK_TOOL);
+
+      // Personal account tools only for linked (non-house) users
+      if (!chatContext?.isHouseAccount) {
+        tools.push(
+          RESY_CANCEL_TOOL,
+          RESY_RESERVATIONS_TOOL,
+          RESY_PROFILE_TOOL,
+          RESY_SIGN_OUT_TOOL,
+        );
+      }
     }
     if (chatContext?.isGroupChat) {
       tools.push(RENAME_CHAT_TOOL);

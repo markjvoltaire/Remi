@@ -39,6 +39,7 @@ describe('loadUserContext', () => {
     expect(ctx).not.toBeNull();
     expect(ctx!.user).toEqual(user);
     expect(ctx!.bookingsCredentials).toEqual(creds);
+    expect(ctx!.isHouseAccount).toBe(false);
     expect(mockUpdateLastActive).toHaveBeenCalledWith('+1111');
   });
 
@@ -75,6 +76,7 @@ describe('loadUserContext', () => {
     const ctx = await loadUserContext('+3333');
     expect(ctx).not.toBeNull();
     expect(ctx!.bookingsCredentials.resyAuthToken).toBe('env_tok_fallback');
+    expect(ctx!.isHouseAccount).toBe(true);
   });
 
   it('returns null when user signed out (even with env token)', async () => {
@@ -123,5 +125,6 @@ describe('loadUserContext', () => {
     expect(ctx).not.toBeNull();
     expect(mockCreateUser).toHaveBeenCalledWith('+5555');
     expect(ctx!.bookingsCredentials.resyAuthToken).toBe('env_tok_create');
+    expect(ctx!.isHouseAccount).toBe(true);
   });
 });

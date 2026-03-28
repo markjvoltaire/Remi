@@ -66,8 +66,6 @@ const mockGetPendingChallenge = vi.fn().mockResolvedValue(null);
 const mockClearPendingChallenge = vi.fn().mockResolvedValue(undefined);
 const mockSetCredentials = vi.fn().mockResolvedValue(undefined);
 const mockClearSignedOut = vi.fn().mockResolvedValue(undefined);
-const mockDeliverMagicLinkOnboarding = vi.fn().mockResolvedValue(true);
-const mockIsMagicLinkOnboardingEnabled = vi.fn().mockReturnValue(false);
 const mockAfterResyCredentialsLinked = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('../../auth/index.js', () => ({
@@ -83,8 +81,6 @@ vi.mock('../../auth/index.js', () => ({
   clearPendingChallenge: (...args: unknown[]) => mockClearPendingChallenge(...args),
   setCredentials: (...args: unknown[]) => mockSetCredentials(...args),
   clearSignedOut: (...args: unknown[]) => mockClearSignedOut(...args),
-  deliverMagicLinkOnboarding: (...args: unknown[]) => mockDeliverMagicLinkOnboarding(...args),
-  isMagicLinkOnboardingEnabled: (...args: unknown[]) => mockIsMagicLinkOnboardingEnabled(...args),
   afterResyCredentialsLinked: (...args: unknown[]) => mockAfterResyCredentialsLinked(...args),
 }));
 
@@ -197,8 +193,6 @@ beforeEach(() => {
     fingerprint: '1',
   });
   mockRecordPaymentSnapshotTransition.mockReturnValue({ paymentBecameAvailable: false });
-  mockDeliverMagicLinkOnboarding.mockResolvedValue(true);
-  mockIsMagicLinkOnboardingEnabled.mockReturnValue(false);
   mockAfterResyCredentialsLinked.mockResolvedValue(undefined);
 });
 
@@ -240,54 +234,63 @@ describe('processor handler', () => {
     expect(mockSetCredentials).toHaveBeenCalledWith('+14155551234', { resyAuthToken: 'resy_tok_from_challenge' });
   });
 
-  it('unauthenticated user triggers SMS OTP by default', async () => {
+  it('no house account and no credentials sends fallback message (no forced OTP)', async () => {
     mockLoadUserContext.mockResolvedValue(null);
     mockGetUser.mockResolvedValue(null);
-    mockSendResyOTP.mockResolvedValue('sms');
 
     await handler(makeSQSEvent('find me a restaurant'), dummyContext, () => {});
 
-    expect(mockAddMessage).toHaveBeenCalledWith('chat_1', 'user', 'find me a restaurant', '+14155551234');
-    expect(mockDeliverMagicLinkOnboarding).not.toHaveBeenCalled();
-    expect(mockSendResyOTP).toHaveBeenCalledWith('+14155551234');
-    expect(mockSetPendingOTP).toHaveBeenCalled();
-  });
-
-  it('unauthenticated user gets magic link when REM_MAGIC_LINK_ONBOARDING is enabled', async () => {
-    mockIsMagicLinkOnboardingEnabled.mockReturnValue(true);
-    mockLoadUserContext.mockResolvedValue(null);
-    mockGetUser.mockResolvedValue(null);
-    mockSendResyOTP.mockResolvedValue('sms');
-
-    await handler(makeSQSEvent('find me a restaurant'), dummyContext, () => {});
-
-    expect(mockDeliverMagicLinkOnboarding).toHaveBeenCalledWith(
-      'chat_1',
-      '+14155551234',
-      expect.any(Function),
-    );
     expect(mockSendResyOTP).not.toHaveBeenCalled();
     expect(mockSetPendingOTP).not.toHaveBeenCalled();
+    expect(mockAddMessage).not.toHaveBeenCalled();
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      'chat_1',
+      "hey, i'm having trouble connecting to our reservation system right now. sit tight — i'll sort it out.",
+    );
   });
 
-  it('unauthenticated user falls back to SMS when magic link delivery fails', async () => {
-    mockIsMagicLinkOnboardingEnabled.mockReturnValue(true);
-    mockDeliverMagicLinkOnboarding.mockResolvedValue(false);
-    mockLoadUserContext.mockResolvedValue(null);
-    mockGetUser.mockResolvedValue(null);
+  it('house account user reaches Claude with isHouseAccount true and skips payment verify', async () => {
+    mockLoadUserContext.mockResolvedValue({
+      user: { phoneNumber: '+14155551234', createdAt: new Date(), lastActive: new Date(), onboardingComplete: false },
+      bookingsCredentials: { resyAuthToken: 'house_tok' },
+      isHouseAccount: true,
+    });
+
+    await handler(makeSQSEvent('find me sushi in NYC'), dummyContext, () => {});
+
+    expect(mockVerifyPaymentStatus).not.toHaveBeenCalled();
+    expect(mockChat).toHaveBeenCalledWith(
+      'chat_1',
+      'find me sushi in NYC',
+      [],
+      [],
+      expect.objectContaining({
+        isHouseAccount: true,
+        bookingsCredentials: { resyAuthToken: 'house_tok' },
+      }),
+    );
+  });
+
+  it('opt-in link my resy on house account triggers OTP', async () => {
+    mockLoadUserContext.mockResolvedValue({
+      user: { phoneNumber: '+14155551234', createdAt: new Date(), lastActive: new Date(), onboardingComplete: false },
+      bookingsCredentials: { resyAuthToken: 'house_tok' },
+      isHouseAccount: true,
+    });
     mockSendResyOTP.mockResolvedValue('sms');
 
-    await handler(makeSQSEvent('hello'), dummyContext, () => {});
+    await handler(makeSQSEvent('link my resy account'), dummyContext, () => {});
 
-    expect(mockDeliverMagicLinkOnboarding).toHaveBeenCalled();
     expect(mockSendResyOTP).toHaveBeenCalledWith('+14155551234');
     expect(mockSetPendingOTP).toHaveBeenCalled();
+    expect(mockChat).not.toHaveBeenCalled();
   });
 
   it('group chat message runs classifier', async () => {
     mockLoadUserContext.mockResolvedValue({
-      user: { phoneNumber: '+14155551234' },
+      user: { phoneNumber: '+14155551234', createdAt: new Date(), lastActive: new Date(), onboardingComplete: true },
       bookingsCredentials: { resyAuthToken: 'tok' },
+      isHouseAccount: false,
     });
     mockGetChat.mockResolvedValue({
       id: 'chat_1',
@@ -310,8 +313,9 @@ describe('processor handler', () => {
 
   it('main flow calls Claude chat and sends response', async () => {
     mockLoadUserContext.mockResolvedValue({
-      user: { phoneNumber: '+14155551234' },
+      user: { phoneNumber: '+14155551234', createdAt: new Date(), lastActive: new Date(), onboardingComplete: true },
       bookingsCredentials: { resyAuthToken: 'tok' },
+      isHouseAccount: false,
     });
     mockChat.mockResolvedValue({
       text: 'sure, searching for restaurants now',

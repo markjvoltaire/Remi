@@ -21,8 +21,6 @@ import {
   setPendingOTP, getPendingOTP, clearPendingOTP,
   setPendingChallenge, getPendingChallenge, clearPendingChallenge,
   setCredentials, clearSignedOut,
-  deliverMagicLinkOnboarding,
-  isMagicLinkOnboardingEnabled,
   afterResyCredentialsLinked,
 } from '../auth/index.js';
 import {
@@ -310,37 +308,29 @@ async function processRecord(record: SQSRecord): Promise<void> {
   if (!userCtx) {
     if (!(await getUser(from))) {
       await createUser(from);
-      console.log(`[processor] New user: ${redactPhone(from)}`);
+      console.log(`[processor] New user (no house account available): ${redactPhone(from)}`);
     }
+    await sendMessage(chatId, `hey, i'm having trouble connecting to our reservation system right now. sit tight — i'll sort it out.`);
+    console.log(`[processor] No Resy credentials and no house account for ${redactPhone(from)}`);
+    return;
+  }
 
-    const inbound = text.trim();
-    if (inbound) {
-      await addMessage(chatId, 'user', inbound, from);
-    }
+  // ── Opt-in Resy account linking (house-account guests only) ────────
+  const wantsToLink = /\b(link|connect|pair|attach)\b.*\b(resy|account|reservation)\b/i.test(text)
+    || /\b(resy|account|reservation)\b.*\b(link|connect|pair|attach)\b/i.test(text);
 
-    if (isMagicLinkOnboardingEnabled()) {
-      const magicOk = await deliverMagicLinkOnboarding(chatId, from, msg => sendMessage(chatId, msg));
-      if (magicOk) {
-        console.log(`[processor] Sent magic link onboarding to ${redactPhone(from)}`);
-        return;
-      }
-      console.warn(`[processor] Magic link failed — falling back to SMS OTP for ${redactPhone(from)}`);
-    }
-
+  if (wantsToLink && userCtx.isHouseAccount) {
     const otpResult = await sendResyOTP(from);
     if (otpResult === 'sms') {
       await setPendingOTP(from, chatId);
       await sendMessage(chatId, resyLinkMessages.otpSentFirst);
       await new Promise(resolve => setTimeout(resolve, 600));
       await sendMessage(chatId, resyLinkMessages.otpSentSecond);
+      console.log(`[processor] User requested Resy link — sent OTP to ${redactPhone(from)}`);
     } else if (otpResult === 'rate_limited') {
-      await sendMessage(chatId, resyLinkMessages.rateLimitedFirst);
-      await new Promise(resolve => setTimeout(resolve, 600));
-      await sendMessage(chatId, resyLinkMessages.rateLimitedSecond);
+      await sendMessage(chatId, `verification texts are limited right now — try again in a few minutes.`);
     } else {
-      await sendMessage(chatId, resyLinkMessages.otpSendFailedFirst);
-      await new Promise(resolve => setTimeout(resolve, 600));
-      await sendMessage(chatId, resyLinkMessages.otpSendFailedSecond);
+      await sendMessage(chatId, `i couldn't send a verification code to this number. you can still book through me — i'll handle everything.`);
     }
     return;
   }
@@ -371,7 +361,7 @@ async function processRecord(record: SQSRecord): Promise<void> {
   let hasPaymentMethod: boolean | undefined;
   let paymentBecameAvailable = false;
   const resyToken = userCtx.bookingsCredentials?.resyAuthToken;
-  if (resyToken && messageSuggestsBookingIntent(text)) {
+  if (resyToken && !userCtx.isHouseAccount && messageSuggestsBookingIntent(text)) {
     try {
       const payStatus = await verifyPaymentStatus(resyToken);
       const snap = recordPaymentSnapshotTransition(from, payStatus);
@@ -394,6 +384,7 @@ async function processRecord(record: SQSRecord): Promise<void> {
     justOnboarded,
     hasPaymentMethod,
     paymentBecameAvailable,
+    isHouseAccount: userCtx.isHouseAccount,
   });
   console.log(`[timing] claude: ${Date.now() - start}ms`);
 

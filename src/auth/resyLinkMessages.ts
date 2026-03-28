@@ -21,14 +21,14 @@ export const resyLinkMessages = {
 
   rateLimitedFirst: 'Our partner is limiting texts to your number for the moment.',
   rateLimitedSecond:
-    'If you prefer, you can paste your reservation partner token — from resy.com in your browser, dev tools, copy x-resy-auth-token from a request, and send it here.',
-  otpSendFailedFirst: "I couldn't send a code to this number — the partner usually needs this phone on your profile.",
+    'No worries — you can still book through me without linking. Just tell me what you need.',
+  otpSendFailedFirst: "I couldn't send a verification code to this number right now.",
   otpSendFailedSecond:
-    'Alternatively you can paste your partner token — resy.com, dev tools, copy x-resy-auth-token from a request, and send it here.',
+    "Not a problem — you can still book through me directly. Just tell me what you need and I'll handle it.",
 
   manualConnectFirst: "I'm having trouble finishing the link automatically.",
   manualConnectSecond:
-    'You can connect manually: log into resy.com, open dev tools (F12), Network tab, copy the x-resy-auth-token header from any request, and paste it here.',
+    'You can still book through me without linking — just tell me what you need. Or try linking again later by texting "link my resy".',
 
   /**
    * Guided entry: stable login first (avoids fragile deep links). Optional override for PAYMENT_SETUP_URL / vault hosts.
