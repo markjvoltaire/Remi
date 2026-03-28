@@ -3,6 +3,7 @@ import { getConversation, addMessage, clearConversation, getUserProfile, setUser
 import { searchRestaurants, findSlots, bookReservation, getReservations, cancelReservation, getResyProfile } from '../bookings/index.js';
 import type { BookingsCredentials } from '../auth/types.js';
 import { clearCredentials, clearSignedOut as clearSignedOutFlag, isResySharedTokenMode } from '../auth/index.js';
+import { buildUberRideDeepLink } from '../concierge/uberRideLink.js';
 
 const client = new Anthropic();
 
@@ -31,6 +32,7 @@ Vocabulary: prefer "I've found the table and I'm ready to lock it in" over "erro
 - List upcoming reservations and fetch profile details via resy_profile when helpful
 - Give thoughtful recommendations (cuisine, neighborhood, occasion)
 - Use web search when guests want nuance beyond availability (reviews, hours, vibe)
+- When they want a ride, car, or Uber, or transport: you cannot hail a car yourself — you build a tap link. **Do not call uber_ride_link until you have both pickup and destination** (see Rides flow below). If they already stated both clearly in the thread, skip straight to the tool.
 
 ## Resy booking flow (tools)
 1. resy_search → venue IDs
@@ -39,6 +41,14 @@ Vocabulary: prefer "I've found the table and I'm ready to lock it in" over "erro
 4. resy_cancel → requires resy_token from resy_reservations
 
 When a booking succeeds, ALWAYS send venue_url from the confirmation as its own message so the guest can tap it. Example tone: "It's handled." --- "Your table at [Restaurant] is set for [time]." --- then the URL on its own line after --- .
+
+## Rides — two questions, then the link
+When they ask for a ride (first time or missing info), **one question per message only**:
+1) If you do not know **where they are** (pickup), ask only that — e.g. where should pickup be, or if they're fine using their current location in the app.
+2) After they answer, if you do not know **where they're going**, ask only that.
+3) When you have both, call uber_ride_link (use pickup_my_location / omit pickup address if they chose current location). Send the URL on its own line in a separate --- segment. Warm short line before the link.
+
+When uber_ride_link returns a URL, include uber_url verbatim on its own line so it stays tappable, same as venue links.
 
 If nothing is available, say it gracefully — e.g. that evening is fully committed — without blaming a system.
 
@@ -383,10 +393,38 @@ const RESY_SIGN_OUT_TOOL: Anthropic.Tool = {
   },
 };
 
+const UBER_RIDE_LINK_TOOL: Anthropic.Tool = {
+  name: 'uber_ride_link',
+  description:
+    'Build a tap-friendly Uber deep link. Call ONLY after the guest has provided both pickup and destination in the conversation (pickup may be "current location" / use my location). If they just said they want a ride and either is missing, do NOT call this — ask pickup first in one message, then destination in the next. Use addresses or place names from the thread; add city or neighborhood if needed for clarity.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      dropoff_formatted_address: {
+        type: 'string',
+        description: 'Destination as a full address or descriptive place string (e.g. "Carbone, New York, NY").',
+      },
+      dropoff_nickname: {
+        type: 'string',
+        description: 'Short label for the destination (e.g. venue name) — optional, pairs well with address.',
+      },
+      pickup_formatted_address: {
+        type: 'string',
+        description: 'Pickup address if they specified one; leave empty to use their current location in the Uber app.',
+      },
+      pickup_my_location: {
+        type: 'boolean',
+        description: 'If true (default), pickup is their current GPS location. Set false only when pickup_formatted_address is set.',
+      },
+    },
+  },
+};
+
 // Tools that return data Claude needs to reason about (require tool-use loop)
 const DATA_RETRIEVAL_TOOLS = new Set([
   'resy_search', 'resy_find_slots', 'resy_reservations',
   'resy_book', 'resy_cancel', 'resy_sign_out', 'resy_profile',
+  'uber_ride_link',
 ]);
 
 const MAX_TOOL_LOOPS = 5;
@@ -580,7 +618,7 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
 
     // Build tools list
     const tools: Anthropic.Tool[] = [
-      REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, WEB_SEARCH_TOOL,
+      REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, WEB_SEARCH_TOOL, UBER_RIDE_LINK_TOOL,
     ];
     if (resyAuthToken) {
       // All users get search, slots, and booking tools
@@ -714,6 +752,29 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Could not determine user identity.', is_error: true });
           }
 
+        } else if (block.name === 'uber_ride_link') {
+          const input = block.input as {
+            dropoff_formatted_address?: string;
+            dropoff_nickname?: string;
+            pickup_formatted_address?: string;
+            pickup_my_location?: boolean;
+          };
+          const url = buildUberRideDeepLink({
+            dropoffFormattedAddress: input.dropoff_formatted_address,
+            dropoffNickname: input.dropoff_nickname,
+            pickupFormattedAddress: input.pickup_formatted_address,
+            pickupMyLocation: input.pickup_my_location,
+          });
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify({
+              uber_url: url,
+              instruction:
+                'Include uber_url verbatim on its own line for the guest to tap. You should already have asked pickup then destination separately before calling this.',
+            }),
+          });
+
         } else {
           // Fire-and-forget tools
           toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'ok' });
@@ -821,6 +882,8 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
         toolSummaryParts.push(`[checked resy profile]`);
       } else if (block.name === 'resy_sign_out') {
         toolSummaryParts.push(`[signed out of resy]`);
+      } else if (block.name === 'uber_ride_link') {
+        toolSummaryParts.push(`[shared uber ride link]`);
       }
     }
 
