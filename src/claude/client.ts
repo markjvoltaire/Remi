@@ -5,6 +5,7 @@ import type { ResyBookingConfirmation } from '../bookings/types.js';
 import type { BookingsCredentials } from '../auth/types.js';
 import { clearCredentials, clearSignedOut as clearSignedOutFlag, isResySharedTokenMode } from '../auth/index.js';
 import { buildUberRideDeepLink } from '../concierge/uberRideLink.js';
+import { inferResyGeoFromText, threadSnippetForGeo } from '../bookings/geo.js';
 
 const client = new Anthropic();
 
@@ -40,6 +41,8 @@ Vocabulary: prefer "I've found the table and I'm ready to lock it in" over "erro
 2. resy_find_slots → open times for date and party size
 3. resy_book → only after explicit guest confirmation; this creates a REAL reservation
 4. resy_cancel → requires resy_token from resy_reservations
+
+When the guest names a city (e.g. Miami, Los Angeles), the search geo should match that market — pass lat/lng in tools or ensure the thread mentions the city so results are not NYC-biased. Use venue_id values exactly from resy_search results; do not invent IDs.
 
 BOOKING INTEGRITY (non-negotiable): You must call resy_book and receive a successful tool result before you tell the guest anything is booked, confirmed, or secured — including phrases like "it's handled" or "your table is set." If you have not completed resy_book successfully in this turn, do not imply the reservation exists; say you are still locking it in or ask what you need next. Never write "[booked a reservation]" in guest-facing text (internal logging only).
 
@@ -285,11 +288,11 @@ const RESY_SEARCH_TOOL: Anthropic.Tool = {
       },
       lat: {
         type: 'number',
-        description: 'Latitude for location-based search. Defaults to NYC.',
+        description: 'Latitude for location-based search. OMIT only if the guest did not name a city — the system infers Miami, LA, etc. from the thread; otherwise set explicitly when you know the market.',
       },
       lng: {
         type: 'number',
-        description: 'Longitude for location-based search. Defaults to NYC.',
+        description: 'Longitude for location-based search. Pair with lat (same rules).',
       },
     },
     required: ['query'],
@@ -316,11 +319,11 @@ const RESY_FIND_SLOTS_TOOL: Anthropic.Tool = {
       },
       lat: {
         type: 'number',
-        description: 'Latitude. Defaults to NYC.',
+        description: 'Latitude for /4/find (should match the city of the venue). Omit if the thread already names the city — the system infers common markets.',
       },
       lng: {
         type: 'number',
-        description: 'Longitude. Defaults to NYC.',
+        description: 'Longitude for /4/find; pair with lat.',
       },
     },
     required: ['venue_id', 'date', 'party_size'],
@@ -459,32 +462,72 @@ function ordinalToIndex(message: string): number | null {
   return n - 1;
 }
 
+/**
+ * Pick a venue from the last resy_search cache using the full thread (not just the latest SMS),
+ * with Miami vs NYC (etc.) disambiguation when multiple venues share a short name like "Carbone".
+ */
 function resolveVenueFromSelection(
   chatId: string,
-  userMessage: string,
+  threadText: string,
   fallbackVenueId: number,
 ): number {
   const cached = recentVenueOptionsByChat.get(chatId);
   if (!cached || cached.length === 0) return fallbackVenueId;
 
-  const normalizedMessage = normalizeText(userMessage);
+  const normalizedMessage = normalizeText(threadText);
   if (!normalizedMessage) return fallbackVenueId;
 
-  // Strongest signal: explicit restaurant name mention.
+  const candidates: VenueSelection[] = [];
   for (const venue of cached) {
     const normalizedName = normalizeText(venue.name);
     if (normalizedName.length >= 3 && normalizedMessage.includes(normalizedName)) {
-      return venue.venue_id;
+      candidates.push(venue);
     }
   }
 
-  // Secondary signal: "first/second/3rd one"
-  const idx = ordinalToIndex(normalizedMessage);
-  if (idx !== null && idx >= 0 && idx < cached.length) {
-    return cached[idx].venue_id;
+  let pool = candidates;
+  if (pool.length === 0) {
+    const idx = ordinalToIndex(normalizedMessage);
+    if (idx !== null && idx >= 0 && idx < cached.length) {
+      return cached[idx].venue_id;
+    }
+    return fallbackVenueId;
   }
 
-  return fallbackVenueId;
+  const miamiHint = /\b(miami|south beach|brickell|wynwood|collins|coral gables|miami beach|florida)\b/i.test(threadText);
+  const nyHint = /\b(new york|nyc|manhattan|brooklyn|queens|soho|tribeca|west village|ues)\b/i.test(threadText);
+  if (miamiHint) {
+    const narrowed = pool.filter(v => /\bmiami|beach|south|collins|florida\b/i.test(v.name));
+    if (narrowed.length > 0) pool = narrowed;
+  } else if (nyHint) {
+    const narrowed = pool.filter(v => !/\bmiami\b/i.test(v.name));
+    if (narrowed.length > 0) pool = narrowed;
+  }
+
+  pool = [...pool].sort(
+    (a, b) => normalizeText(b.name).length - normalizeText(a.name).length,
+  );
+  return pool[0].venue_id;
+}
+
+/**
+ * If we have search results for this chat, refuse to call Resy with an arbitrary venue_id (hallucinated or stale).
+ * Falls back to name-based disambiguation within the cached list only.
+ */
+function coerceVenueToCachedOnly(chatId: string, threadText: string, venueId: number): number | null {
+  const cached = recentVenueOptionsByChat.get(chatId);
+  if (!cached?.length) return venueId;
+
+  const allowed = new Set(cached.map(v => v.venue_id));
+  if (allowed.has(venueId)) return venueId;
+
+  const resolved = resolveVenueFromSelection(chatId, threadText, venueId);
+  if (allowed.has(resolved)) return resolved;
+
+  console.warn(
+    `[claude] Venue ${venueId} is not in the current Resy search cache (have: ${[...allowed].join(', ')}); need a fresh resy_search for the right city.`,
+  );
+  return null;
 }
 
 export type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
@@ -670,6 +713,9 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
 
   try {
     const formattedHistory = formatHistoryForClaude(history, chatContext?.isGroupChat ?? false);
+    const recentLinesForGeo = history.slice(-20).map(m => m.content);
+    const venueThreadText = threadSnippetForGeo(textToSend.trim(), recentLinesForGeo);
+    const inferredGeo = inferResyGeoFromText(venueThreadText);
 
     // Build tools list
     const tools: Anthropic.Tool[] = [
@@ -725,7 +771,12 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
         if (block.name === 'resy_search') {
           const input = block.input as { query: string; lat?: number; lng?: number };
           try {
-            const geo = input.lat && input.lng ? { lat: input.lat, lng: input.lng } : undefined;
+            const geo =
+              input.lat != null && input.lng != null
+                ? { lat: input.lat, lng: input.lng }
+                : inferredGeo
+                  ? { lat: inferredGeo.lat, lng: inferredGeo.lng }
+                  : undefined;
             const results = await searchRestaurants(resyAuthToken!, input.query, geo);
             recentVenueOptionsByChat.set(
               chatId,
@@ -740,33 +791,67 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
 
         } else if (block.name === 'resy_find_slots') {
           const input = block.input as { venue_id: number; date: string; party_size: number; lat?: number; lng?: number };
-          const resolvedVenueId = resolveVenueFromSelection(chatId, userMessage, input.venue_id);
-          if (resolvedVenueId !== input.venue_id) {
-            console.log(`[claude] Resolved venue for slots: ${input.venue_id} -> ${resolvedVenueId} from user selection`);
+          const tentativeVenueId = resolveVenueFromSelection(chatId, venueThreadText, input.venue_id);
+          const finalVenueId = coerceVenueToCachedOnly(chatId, venueThreadText, tentativeVenueId);
+          if (finalVenueId === null) {
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content:
+                'Error finding slots: venue_id is not from the last resy_search results. Call resy_search again so venue IDs match the guest’s city (e.g. mention Miami explicitly), then use a venue_id from that response.',
+              is_error: true,
+            });
+            findSlotsSummaries.push('[checked slots: no valid venue — re-run resy_search]');
+          } else {
+            if (finalVenueId !== input.venue_id) {
+              console.log(`[claude] Resolved venue for slots: ${input.venue_id} -> ${finalVenueId} from thread/cache`);
+            }
+            const slotsSummaryLine = `[checked slots: venue ${finalVenueId}, ${input.date}, party of ${input.party_size}]`;
+            try {
+              const explicitGeo = input.lat != null && input.lng != null ? { lat: input.lat, lng: input.lng } : undefined;
+              const geo =
+                explicitGeo ?? (inferredGeo ? { lat: inferredGeo.lat, lng: inferredGeo.lng } : undefined);
+              const slots = await findSlots(resyAuthToken!, finalVenueId, input.date, input.party_size, geo);
+              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(slots) });
+            } catch (error) {
+              const msg = error instanceof Error ? error.message : 'Unknown error';
+              console.error('[claude] resy_find_slots error:', msg);
+              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error finding slots: ${msg}`, is_error: true });
+            }
+            findSlotsSummaries.push(slotsSummaryLine);
           }
-          const slotsSummaryLine = `[checked slots: venue ${resolvedVenueId}, ${input.date}, party of ${input.party_size}]`;
-          try {
-            const geo = input.lat && input.lng ? { lat: input.lat, lng: input.lng } : undefined;
-            const slots = await findSlots(resyAuthToken!, resolvedVenueId, input.date, input.party_size, geo);
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(slots) });
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : 'Unknown error';
-            console.error('[claude] resy_find_slots error:', msg);
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error finding slots: ${msg}`, is_error: true });
-          }
-          findSlotsSummaries.push(slotsSummaryLine);
 
         } else if (block.name === 'resy_book') {
           const input = block.input as { venue_id: number; date: string; party_size: number; time?: string };
           try {
-            const resolvedVenueId = resolveVenueFromSelection(chatId, userMessage, input.venue_id);
-            if (resolvedVenueId !== input.venue_id) {
-              console.log(`[claude] Resolved venue for booking: ${input.venue_id} -> ${resolvedVenueId} from user selection`);
+            const tentativeVenueId = resolveVenueFromSelection(chatId, venueThreadText, input.venue_id);
+            const finalVenueId = coerceVenueToCachedOnly(chatId, venueThreadText, tentativeVenueId);
+            if (finalVenueId === null) {
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content:
+                  'Error booking: venue_id is not from the last resy_search. Run resy_search for the correct city, then resy_book with an id from those results.',
+                is_error: true,
+              });
+              resyBookSummaries.push('[resy_book did not succeed]');
+            } else {
+              if (finalVenueId !== input.venue_id) {
+                console.log(`[claude] Resolved venue for booking: ${input.venue_id} -> ${finalVenueId} from thread/cache`);
+              }
+              const bookGeo = inferredGeo ? { lat: inferredGeo.lat, lng: inferredGeo.lng } : undefined;
+              const confirmation = await bookReservation(
+                resyAuthToken!,
+                finalVenueId,
+                input.date,
+                input.party_size,
+                input.time,
+                bookGeo,
+              );
+              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(confirmation) });
+              bookingSucceeded = true;
+              resyBookSummaries.push('[booked a reservation]');
             }
-            const confirmation = await bookReservation(resyAuthToken!, resolvedVenueId, input.date, input.party_size, input.time);
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(confirmation) });
-            bookingSucceeded = true;
-            resyBookSummaries.push('[booked a reservation]');
           } catch (error) {
             const msg = error instanceof Error ? error.message : 'Unknown error';
             console.error('[claude] resy_book error:', msg);
@@ -920,24 +1005,34 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
     // If the model skipped resy_book but the guest clearly picked a time after we showed slots, book deterministically.
     if (resyAuthToken && !bookingSucceeded && resyBookSummaries.length === 0) {
       const conv = await getConversation(chatId);
+      const convLines = conv.slice(-25).map(m => m.content);
+      const progThreadText = threadSnippetForGeo(userMessage.trim(), convLines);
       const pending = parsePendingSlotCheckFromHistory(conv);
       const timeHHMM = parseGuestTimeToHHMM(userMessage.trim());
       if (pending && timeHHMM) {
-        try {
-          const confirmation = await bookReservation(
-            resyAuthToken,
-            pending.venueId,
-            pending.date,
-            pending.partySize,
-            timeHHMM,
-          );
-          textResponse = buildBookingConfirmationText(confirmation);
-          bookingSucceeded = true;
-          resyBookSummaries.push('[booked a reservation]');
-          console.log('[claude] Programmatic resy_book fallback succeeded');
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error('[claude] Programmatic resy_book fallback failed:', msg);
+        const coercedVenue = coerceVenueToCachedOnly(chatId, progThreadText, pending.venueId);
+        if (coercedVenue === null) {
+          console.warn('[claude] Programmatic resy_book skipped: venue not in last search cache');
+        } else {
+          try {
+            const progGeo = inferResyGeoFromText(progThreadText);
+            const geoArg = progGeo ? { lat: progGeo.lat, lng: progGeo.lng } : undefined;
+            const confirmation = await bookReservation(
+              resyAuthToken,
+              coercedVenue,
+              pending.date,
+              pending.partySize,
+              timeHHMM,
+              geoArg,
+            );
+            textResponse = buildBookingConfirmationText(confirmation);
+            bookingSucceeded = true;
+            resyBookSummaries.push('[booked a reservation]');
+            console.log('[claude] Programmatic resy_book fallback succeeded');
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error('[claude] Programmatic resy_book fallback failed:', msg);
+          }
         }
       }
     }
