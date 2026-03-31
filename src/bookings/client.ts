@@ -266,24 +266,33 @@ export async function bookReservation(
     body: bookBody.toString(),
   });
 
-  const bookData = await bookRes.json() as {
-    resy_token: string;
-    reservation_id: number;
-    date: string;
-    time_slot: string;
-    num_seats: number;
-  };
+  const bookData = await bookRes.json() as Record<string, unknown>;
 
-  console.log(`[resy] Booked! resy_token=${bookData.resy_token}, reservation_id=${bookData.reservation_id}`);
+  const reservationId = bookData.reservation_id ?? bookData.id;
+  const resyToken = bookData.resy_token ?? bookData.token;
+  if (
+    reservationId == null
+    || resyToken == null
+    || (typeof resyToken === 'string' && resyToken.length === 0)
+  ) {
+    throw new Error(
+      `Resy did not return a reservation (response: ${JSON.stringify(bookData)}). The slot may have been taken or payment could not be charged.`,
+    );
+  }
+
+  const timeSlot = typeof bookData.time_slot === 'string' ? bookData.time_slot : typeof bookData.time === 'string' ? bookData.time : '';
+  const numSeats = typeof bookData.num_seats === 'number' ? bookData.num_seats : partySize;
+
+  console.log(`[resy] Booked! resy_token=${resyToken}, reservation_id=${reservationId}`);
 
   return {
-    resy_token: bookData.resy_token,
-    reservation_id: bookData.reservation_id,
+    resy_token: String(resyToken),
+    reservation_id: Number(reservationId),
     venue_name: venueName,
     venue_url: venueUrl,
     date: day,
-    time: bookData.time_slot || day,
-    party_size: bookData.num_seats || partySize,
+    time: timeSlot || day,
+    party_size: numSeats,
     type: slotType,
   };
 }

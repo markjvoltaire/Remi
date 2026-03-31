@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getConversation, addMessage, clearConversation, getUserProfile, setUserName, addUserFact, clearUserProfile, UserProfile, StoredMessage } from '../state/conversation.js';
 import { searchRestaurants, findSlots, bookReservation, getReservations, cancelReservation, getResyProfile } from '../bookings/index.js';
+import type { ResyBookingConfirmation } from '../bookings/types.js';
 import type { BookingsCredentials } from '../auth/types.js';
 import { clearCredentials, clearSignedOut as clearSignedOutFlag, isResySharedTokenMode } from '../auth/index.js';
 import { buildUberRideDeepLink } from '../concierge/uberRideLink.js';
@@ -40,7 +41,9 @@ Vocabulary: prefer "I've found the table and I'm ready to lock it in" over "erro
 3. resy_book → only after explicit guest confirmation; this creates a REAL reservation
 4. resy_cancel → requires resy_token from resy_reservations
 
-When a booking succeeds, ALWAYS send venue_url from the confirmation as its own message so the guest can tap it. Example tone: "It's handled." --- "Your table at [Restaurant] is set for [time]." --- then the URL on its own line after --- .
+BOOKING INTEGRITY (non-negotiable): You must call resy_book and receive a successful tool result before you tell the guest anything is booked, confirmed, or secured — including phrases like "it's handled" or "your table is set." If you have not completed resy_book successfully in this turn, do not imply the reservation exists; say you are still locking it in or ask what you need next. Never write "[booked a reservation]" in guest-facing text (internal logging only).
+
+When resy_book returns a confirmation JSON, ALWAYS send venue_url from that result as its own message segment so the guest can tap it. Example structure: short assurance --- essentials (name, date, time, party) --- venue_url on its own line (use --- between segments).
 
 ## Rides — two questions, then the link
 When they ask for a ride (first time or missing info), **one question per message only**:
@@ -546,6 +549,58 @@ function formatHistoryForClaude(messages: StoredMessage[], isGroupChat: boolean)
   });
 }
 
+const PENDING_SLOT_CHECK_RE = /\[checked slots: venue (\d+), (\d{4}-\d{2}-\d{2}), party of (\d+)\]/;
+
+function parsePendingSlotCheckFromHistory(messages: StoredMessage[]): { venueId: number; date: string; partySize: number } | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== 'assistant') continue;
+    const m = msg.content.match(PENDING_SLOT_CHECK_RE);
+    if (m) {
+      return { venueId: Number(m[1]), date: m[2], partySize: Number(m[3]) };
+    }
+  }
+  return null;
+}
+
+/** Parses common guest times (e.g. "6:00 pm", "18:30") to HH:MM 24h for Resy. */
+function parseGuestTimeToHHMM(message: string): string | null {
+  const t = message.trim().toLowerCase();
+  if (!t) return null;
+
+  const mer = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a|p)\.?m\.?\b/);
+  if (mer) {
+    let h = parseInt(mer[1], 10);
+    const mins = mer[2] ? parseInt(mer[2], 10) : 0;
+    if (!Number.isFinite(h) || !Number.isFinite(mins)) return null;
+    if (mer[3] === 'p' && h < 12) h += 12;
+    if (mer[3] === 'a' && h === 12) h = 0;
+    return `${h.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+  }
+
+  const twentyFour = t.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+  if (twentyFour) {
+    return `${twentyFour[1].padStart(2, '0')}:${twentyFour[2]}`;
+  }
+
+  return null;
+}
+
+function buildBookingConfirmationText(c: ResyBookingConfirmation): string {
+  return `It's handled. --- Your table at ${c.venue_name} is set for ${c.date} at ${c.time}, party of ${c.party_size}. --- ${c.venue_url}`;
+}
+
+/** Model sometimes mimics a successful book without calling resy_book — detect confident false claims. */
+function textImpliesConfirmedBooking(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.toLowerCase();
+  if (t.includes('[booked a reservation]')) return true;
+  if (t.includes("it's handled") || t.includes('it\u2019s handled')) return true;
+  if (/\byou'?re (all )?set\b/.test(t) && /\b(table|reservation)\b/.test(t)) return true;
+  if (/\ball set\b/.test(t) && /\b(table|reservation|booked)\b/.test(t)) return true;
+  return false;
+}
+
 export async function chat(chatId: string, userMessage: string, images: ImageInput[] = [], audio: AudioInput[] = [], chatContext?: ChatContext): Promise<ChatResponse> {
   const emptyResponse = {
     reaction: null,
@@ -640,6 +695,9 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
 
     // ── Tool-use loop ──────────────────────────────────────────────────────
     let bookingSucceeded = false; // Track if a resy_book call succeeded
+    const resyBookSummaries: string[] = []; // One entry per resy_book tool call, for accurate history tags
+    /** Resolved venue IDs from resy_find_slots (Claude sometimes passes the wrong id — must match what we actually queried). */
+    const findSlotsSummaries: string[] = [];
     const messages: Anthropic.MessageParam[] = [...formattedHistory, { role: 'user', content: messageContent }];
     let response = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -682,11 +740,12 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
 
         } else if (block.name === 'resy_find_slots') {
           const input = block.input as { venue_id: number; date: string; party_size: number; lat?: number; lng?: number };
+          const resolvedVenueId = resolveVenueFromSelection(chatId, userMessage, input.venue_id);
+          if (resolvedVenueId !== input.venue_id) {
+            console.log(`[claude] Resolved venue for slots: ${input.venue_id} -> ${resolvedVenueId} from user selection`);
+          }
+          const slotsSummaryLine = `[checked slots: venue ${resolvedVenueId}, ${input.date}, party of ${input.party_size}]`;
           try {
-            const resolvedVenueId = resolveVenueFromSelection(chatId, userMessage, input.venue_id);
-            if (resolvedVenueId !== input.venue_id) {
-              console.log(`[claude] Resolved venue for slots: ${input.venue_id} -> ${resolvedVenueId} from user selection`);
-            }
             const geo = input.lat && input.lng ? { lat: input.lat, lng: input.lng } : undefined;
             const slots = await findSlots(resyAuthToken!, resolvedVenueId, input.date, input.party_size, geo);
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(slots) });
@@ -695,6 +754,7 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
             console.error('[claude] resy_find_slots error:', msg);
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error finding slots: ${msg}`, is_error: true });
           }
+          findSlotsSummaries.push(slotsSummaryLine);
 
         } else if (block.name === 'resy_book') {
           const input = block.input as { venue_id: number; date: string; party_size: number; time?: string };
@@ -706,10 +766,12 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
             const confirmation = await bookReservation(resyAuthToken!, resolvedVenueId, input.date, input.party_size, input.time);
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(confirmation) });
             bookingSucceeded = true;
+            resyBookSummaries.push('[booked a reservation]');
           } catch (error) {
             const msg = error instanceof Error ? error.message : 'Unknown error';
             console.error('[claude] resy_book error:', msg);
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error booking reservation: ${msg}`, is_error: true });
+            resyBookSummaries.push('[resy_book did not succeed]');
           }
 
         } else if (block.name === 'resy_cancel') {
@@ -846,12 +908,6 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
       }
     }
 
-    // Auto-celebration: if a booking was successfully made, send confetti
-    if (bookingSucceeded && !effect) {
-      effect = { type: 'screen', name: 'celebration' };
-      console.log('[claude] Auto-attaching celebration effect for successful booking');
-    }
-
     // Only take text from the FINAL response
     const finalTextParts: string[] = [];
     for (const block of response.content) {
@@ -859,21 +915,59 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
         finalTextParts.push(block.text);
       }
     }
-    const textResponse = finalTextParts.length > 0 ? finalTextParts.join('\n') : null;
+    let textResponse = finalTextParts.length > 0 ? finalTextParts.join('\n') : null;
+
+    // If the model skipped resy_book but the guest clearly picked a time after we showed slots, book deterministically.
+    if (resyAuthToken && !bookingSucceeded && resyBookSummaries.length === 0) {
+      const conv = await getConversation(chatId);
+      const pending = parsePendingSlotCheckFromHistory(conv);
+      const timeHHMM = parseGuestTimeToHHMM(userMessage.trim());
+      if (pending && timeHHMM) {
+        try {
+          const confirmation = await bookReservation(
+            resyAuthToken,
+            pending.venueId,
+            pending.date,
+            pending.partySize,
+            timeHHMM,
+          );
+          textResponse = buildBookingConfirmationText(confirmation);
+          bookingSucceeded = true;
+          resyBookSummaries.push('[booked a reservation]');
+          console.log('[claude] Programmatic resy_book fallback succeeded');
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error('[claude] Programmatic resy_book fallback failed:', msg);
+        }
+      }
+    }
+
+    if (!bookingSucceeded && textImpliesConfirmedBooking(textResponse)) {
+      console.warn('[claude] Replaced model text that claimed a booking without a successful resy_book');
+      textResponse =
+        "couldn't lock that reservation on the partner side just now — want to try that time again, or pick another?";
+    }
+
+    // After tool loop + programmatic fallback (bookingSucceeded may have flipped)
+    if (bookingSucceeded && !effect) {
+      effect = { type: 'screen', name: 'celebration' };
+      console.log('[claude] Auto-attaching celebration effect for successful booking');
+    }
 
     // Build a summary of tool calls for conversation history
     // This lets Claude reference prior searches, bookings, etc. in follow-up messages
     const toolSummaryParts: string[] = [];
+    let resyBookSummaryIdx = 0;
+    let findSlotsSummaryIdx = 0;
     for (const block of allBlocks) {
       if (block.type !== 'tool_use') continue;
       if (block.name === 'resy_search') {
         const input = block.input as { query: string };
         toolSummaryParts.push(`[searched resy for "${input.query}"]`);
       } else if (block.name === 'resy_find_slots') {
-        const input = block.input as { venue_id: number; date: string; party_size: number };
-        toolSummaryParts.push(`[checked slots: venue ${input.venue_id}, ${input.date}, party of ${input.party_size}]`);
+        toolSummaryParts.push(findSlotsSummaries[findSlotsSummaryIdx++] ?? '[checked slots]');
       } else if (block.name === 'resy_book') {
-        toolSummaryParts.push(`[booked a reservation]`);
+        toolSummaryParts.push(resyBookSummaries[resyBookSummaryIdx++] ?? '[resy_book]');
       } else if (block.name === 'resy_cancel') {
         toolSummaryParts.push(`[cancelled a reservation]`);
       } else if (block.name === 'resy_reservations') {
@@ -885,6 +979,9 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
       } else if (block.name === 'uber_ride_link') {
         toolSummaryParts.push(`[shared uber ride link]`);
       }
+    }
+    while (resyBookSummaryIdx < resyBookSummaries.length) {
+      toolSummaryParts.push(resyBookSummaries[resyBookSummaryIdx++]);
     }
 
     // Add assistant response to history (include tool context so Claude remembers what it did)
