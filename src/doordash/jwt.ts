@@ -7,12 +7,25 @@ export interface DoorDashAccessKeyParts {
 }
 
 /**
+ * Decode DoorDash portal signing secret. DoorDash documents base64url; standard
+ * base64 from env still works after normalization + padding.
+ */
+export function decodeDoorDashSigningSecret(signingSecretBase64: string): Buffer {
+  const s = signingSecretBase64.trim();
+  if (!s) throw new Error('DOORDASH_SIGNING_SECRET is empty');
+  const standard = s.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = standard.length % 4;
+  const padded = pad ? standard + '='.repeat(4 - pad) : standard;
+  return Buffer.from(padded, 'base64');
+}
+
+/**
  * Mint a short-lived JWT for DoorDash OpenAPI (Drive).
  * Never log the returned token.
  */
 export function mintDoorDashJwt(parts: DoorDashAccessKeyParts, ttlSeconds = 300): string {
   const now = Math.floor(Date.now() / 1000);
-  const secret = Buffer.from(parts.signingSecretBase64, 'base64');
+  const secret = decodeDoorDashSigningSecret(parts.signingSecretBase64);
 
   const payload = {
     aud: 'doordash',
