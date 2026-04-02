@@ -4,8 +4,8 @@ import type { DoorDashCreateDeliveryRequest, DoorDashDeliverySummary } from './t
 
 const DEFAULT_BASE = 'https://openapi.doordash.com';
 
-function embeddedCredentialsIfDev(): DoorDashAccessKeyParts | null {
-  if (process.env.NODE_ENV !== 'development') return null;
+/** Returns embedded sandbox keys when non-null. Set to null in embeddedCredentials.ts before production. */
+function embeddedCredentials(): DoorDashAccessKeyParts | null {
   return EMBEDDED_DOORDASH;
 }
 
@@ -21,9 +21,7 @@ export class DoorDashApiError extends Error {
 }
 
 function getBaseUrl(): string {
-  if (process.env.NODE_ENV === 'development' && embeddedCredentialsIfDev() !== null) {
-    return DEFAULT_BASE;
-  }
+  if (embeddedCredentials() !== null) return DEFAULT_BASE;
   const b = process.env.DOORDASH_API_BASE?.trim();
   return b && b.length > 0 ? b.replace(/\/$/, '') : DEFAULT_BASE;
 }
@@ -41,7 +39,7 @@ function loadAccessKeyFromEnv(): DoorDashAccessKeyParts | null {
  * Production: env only.
  */
 function loadAccessKey(): DoorDashAccessKeyParts | null {
-  const embedded = embeddedCredentialsIfDev();
+  const embedded = embeddedCredentials();
   if (embedded !== null) return embedded;
   return loadAccessKeyFromEnv();
 }
@@ -55,7 +53,7 @@ function isDoorDashEnvEnabled(): boolean {
     if (v === 'true' || v === '1' || v === 'yes') return true;
     return false;
   }
-  if (process.env.NODE_ENV === 'development' && embeddedCredentialsIfDev() !== null) return true;
+  if (embeddedCredentials() !== null) return true;
   return false;
 }
 

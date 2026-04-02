@@ -27,8 +27,9 @@ const minimalBody = {
 };
 
 describe('isDoorDashConfigured', () => {
-  it('returns false when DOORDASH_ENABLED is not truthy', () => {
+  it('returns false when DOORDASH_ENABLED is explicitly false', () => {
     vi.unstubAllEnvs();
+    vi.stubEnv('DOORDASH_ENABLED', 'false');
     vi.stubEnv('DOORDASH_DEVELOPER_ID', 'a');
     vi.stubEnv('DOORDASH_KEY_ID', 'b');
     vi.stubEnv('DOORDASH_SIGNING_SECRET', 'YQ==');

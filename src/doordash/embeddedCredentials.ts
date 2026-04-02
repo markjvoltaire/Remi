@@ -1,10 +1,8 @@
 import type { DoorDashAccessKeyParts } from './jwt.js';
 
 /**
- * Sandbox Drive keys for local dev only (`NODE_ENV === "development"`).
- * While embedded is non-null, credentials and API base ignore DOORDASH_* env
- * (so Render/.env copies do not override). Production uses env only.
- * Set to null to opt out; use DOORDASH_ENABLED=false to disable the tool in dev.
+ * Sandbox Drive keys — used everywhere while non-null (overrides DOORDASH_* env).
+ * SET TO null BEFORE PRODUCTION and switch to env-based credentials.
  */
 export const EMBEDDED_DOORDASH: DoorDashAccessKeyParts | null = {
   developerId: 'f4a29465-3b9f-4ac1-ab38-197bbda51170',
