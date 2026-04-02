@@ -38,6 +38,15 @@ describe('isDoorDashConfigured', () => {
   it('returns true when enabled and all secrets set', () => {
     expect(isDoorDashConfigured()).toBe(true);
   });
+
+  it('accepts DOORDASH_ENABLE as alias when DOORDASH_ENABLED is unset', () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv('DOORDASH_ENABLE', 'true');
+    vi.stubEnv('DOORDASH_DEVELOPER_ID', 'a');
+    vi.stubEnv('DOORDASH_KEY_ID', 'b');
+    vi.stubEnv('DOORDASH_SIGNING_SECRET', 'YQ==');
+    expect(isDoorDashConfigured()).toBe(true);
+  });
 });
 
 describe('createDelivery', () => {

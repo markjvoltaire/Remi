@@ -1,7 +1,13 @@
+import { EMBEDDED_DOORDASH } from './embeddedCredentials.js';
 import { mintDoorDashJwt, type DoorDashAccessKeyParts } from './jwt.js';
 import type { DoorDashCreateDeliveryRequest, DoorDashDeliverySummary } from './types.js';
 
 const DEFAULT_BASE = 'https://openapi.doordash.com';
+
+function embeddedCredentialsIfDev(): DoorDashAccessKeyParts | null {
+  if (process.env.NODE_ENV !== 'development') return null;
+  return EMBEDDED_DOORDASH;
+}
 
 export class DoorDashApiError extends Error {
   constructor(
@@ -15,6 +21,9 @@ export class DoorDashApiError extends Error {
 }
 
 function getBaseUrl(): string {
+  if (process.env.NODE_ENV === 'development' && embeddedCredentialsIfDev() !== null) {
+    return DEFAULT_BASE;
+  }
   const b = process.env.DOORDASH_API_BASE?.trim();
   return b && b.length > 0 ? b.replace(/\/$/, '') : DEFAULT_BASE;
 }
@@ -27,14 +36,36 @@ function loadAccessKeyFromEnv(): DoorDashAccessKeyParts | null {
   return { developerId, keyId, signingSecretBase64 };
 }
 
+/**
+ * Development: embedded credentials first (ignore DOORDASH_* in .env) for fast local/sandbox tests.
+ * Production: env only.
+ */
+function loadAccessKey(): DoorDashAccessKeyParts | null {
+  const embedded = embeddedCredentialsIfDev();
+  if (embedded !== null) return embedded;
+  return loadAccessKeyFromEnv();
+}
+
+function isDoorDashEnvEnabled(): boolean {
+  const raw = process.env.DOORDASH_ENABLED ?? process.env.DOORDASH_ENABLE;
+  const trimmed = raw !== undefined && raw !== null ? String(raw).trim() : '';
+  if (trimmed !== '') {
+    const v = trimmed.toLowerCase();
+    if (v === 'false' || v === '0' || v === 'no') return false;
+    if (v === 'true' || v === '1' || v === 'yes') return true;
+    return false;
+  }
+  if (process.env.NODE_ENV === 'development' && embeddedCredentialsIfDev() !== null) return true;
+  return false;
+}
+
 export function isDoorDashConfigured(): boolean {
-  const enabled = process.env.DOORDASH_ENABLED?.trim().toLowerCase();
-  if (enabled !== 'true' && enabled !== '1' && enabled !== 'yes') return false;
-  return loadAccessKeyFromEnv() !== null;
+  if (!isDoorDashEnvEnabled()) return false;
+  return loadAccessKey() !== null;
 }
 
 async function doorDashFetch(path: string, init: RequestInit): Promise<Response> {
-  const key = loadAccessKeyFromEnv();
+  const key = loadAccessKey();
   if (!key) {
     throw new Error('DoorDash credentials are not configured');
   }
