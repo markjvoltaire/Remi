@@ -6,6 +6,12 @@ import type { BookingsCredentials } from '../auth/types.js';
 import { clearCredentials, clearSignedOut as clearSignedOutFlag, isResySharedTokenMode } from '../auth/index.js';
 import { buildUberRideDeepLink } from '../concierge/uberRideLink.js';
 import { inferResyGeoFromText, threadSnippetForGeo } from '../bookings/geo.js';
+import {
+  createDelivery,
+  DoorDashApiError,
+  isDoorDashConfigured,
+  type DoorDashCreateDeliveryRequest,
+} from '../doordash/index.js';
 
 const client = new Anthropic();
 
@@ -35,6 +41,7 @@ Vocabulary: prefer "I've found the table and I'm ready to lock it in" over "erro
 - Give thoughtful recommendations (cuisine, neighborhood, occasion)
 - Use web search when guests want nuance beyond availability (reviews, hours, vibe)
 - When they want a ride, car, or Uber, or transport: you cannot hail a car yourself — you build a tap link. **Do not call uber_ride_link until you have both pickup and destination** (see Rides flow below). If they already stated both clearly in the thread, skip straight to the tool.
+- When they want **food or package delivery** via DoorDash Drive: you cannot wing it — see **DoorDash delivery** below. Never invent addresses, phone numbers, or dollar amounts.
 
 ## Resy booking flow (tools)
 1. resy_search → venue IDs
@@ -57,6 +64,19 @@ When they ask for a ride (first time or missing info), **one question per messag
 When uber_ride_link returns a URL, include uber_url verbatim on its own line so it stays tappable, same as venue links.
 
 If nothing is available, say it gracefully — e.g. that evening is fully committed — without blaming a system.
+
+## DoorDash delivery — staged, not a form
+When a guest wants something **picked up and brought to them** (DoorDash Drive), the tool needs structured fields, but your **conversation must stay concierge-like**: short lines, **one missing detail per message** when possible, no numbered checklists or "required fields" language. Say you're locking it in or sending the Dasher — never "submit the form."
+
+**Do not call doordash_create_delivery** until **all** of the following are explicitly stated in the thread (never guess):
+- Full pickup address + pickup business name (e.g. which McDonald's)
+- Full dropoff address + dropoff business name (e.g. "Mark — home" with a real address)
+- Pickup and dropoff **E.164** phone numbers — if the guest confirms **one number for both**, use that same value for both fields in the tool
+- **order_value** as integer **cents** (ask "roughly how much before tip?" in plain language, then convert)
+
+**Suggested order** (skip steps they already answered): acknowledge intent → which store/address to pick up → where to bring it → best phone(s) for the driver → rough order total → then the tool → brief confirmation (include external id or status from the tool result if helpful).
+
+While using **sandbox** credentials, deliveries are simulated — you may mention that lightly if they ask, without sounding technical.
 
 ## Conversation memory
 Use full thread context. Resolve "that one", "tomorrow instead", "8pm", ordinals, and follow-ups from prior searches and holds. Remember what was booked or cancelled.
@@ -426,11 +446,44 @@ const UBER_RIDE_LINK_TOOL: Anthropic.Tool = {
   },
 };
 
+const DOORDASH_CREATE_DELIVERY_TOOL: Anthropic.Tool = {
+  name: 'doordash_create_delivery',
+  description:
+    'Create a DoorDash Drive delivery (sandbox or production per environment). Do NOT call until pickup_address, pickup_business_name, pickup_phone_number, dropoff_address, dropoff_business_name, dropoff_phone_number, and order_value (integer cents) are all explicitly confirmed in the thread — collect over multiple turns, one question at a time when possible, like the Rides flow. Never invent addresses or phones; if the guest says one number works for pickup and dropoff, pass the same E.164 string for both phone fields.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      pickup_address: { type: 'string', description: 'Full street address for pickup.' },
+      pickup_business_name: { type: 'string', description: 'Business name at pickup (e.g. restaurant name).' },
+      pickup_phone_number: { type: 'string', description: 'E.164 phone for pickup contact.' },
+      pickup_instructions: { type: 'string', description: 'Optional pickup notes for the Dasher.' },
+      dropoff_address: { type: 'string', description: 'Full street address for dropoff.' },
+      dropoff_business_name: { type: 'string', description: 'Recipient or place label at dropoff.' },
+      dropoff_phone_number: { type: 'string', description: 'E.164 phone for dropoff contact.' },
+      dropoff_instructions: { type: 'string', description: 'Optional dropoff notes.' },
+      order_value: {
+        type: 'number',
+        description: 'Declared order value in integer cents (e.g. 1999 for $19.99), from what the guest confirmed.',
+      },
+    },
+    required: [
+      'pickup_address',
+      'pickup_business_name',
+      'pickup_phone_number',
+      'dropoff_address',
+      'dropoff_business_name',
+      'dropoff_phone_number',
+      'order_value',
+    ],
+  },
+};
+
 // Tools that return data Claude needs to reason about (require tool-use loop)
 const DATA_RETRIEVAL_TOOLS = new Set([
   'resy_search', 'resy_find_slots', 'resy_reservations',
   'resy_book', 'resy_cancel', 'resy_sign_out', 'resy_profile',
   'uber_ride_link',
+  'doordash_create_delivery',
 ]);
 
 const MAX_TOOL_LOOPS = 5;
@@ -721,6 +774,9 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
     const tools: Anthropic.Tool[] = [
       REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, WEB_SEARCH_TOOL, UBER_RIDE_LINK_TOOL,
     ];
+    if (isDoorDashConfigured()) {
+      tools.push(DOORDASH_CREATE_DELIVERY_TOOL);
+    }
     if (resyAuthToken) {
       // All users get search, slots, and booking tools
       tools.push(RESY_SEARCH_TOOL, RESY_FIND_SLOTS_TOOL, RESY_BOOK_TOOL);
@@ -899,6 +955,77 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
             toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Could not determine user identity.', is_error: true });
           }
 
+        } else if (block.name === 'doordash_create_delivery') {
+          const input = block.input as {
+            pickup_address: string;
+            pickup_business_name: string;
+            pickup_phone_number: string;
+            pickup_instructions?: string;
+            dropoff_address: string;
+            dropoff_business_name: string;
+            dropoff_phone_number: string;
+            dropoff_instructions?: string;
+            order_value: number;
+          };
+          try {
+            const safeChat = chatId.replace(/[^a-zA-Z0-9_-]/g, '').slice(-24) || 'thread';
+            const external_delivery_id = `remi-${safeChat}-${Date.now()}`;
+            const orderValue = Math.round(Number(input.order_value));
+            if (!Number.isFinite(orderValue) || orderValue <= 0) {
+              throw new Error('order_value must be a positive integer in cents');
+            }
+            const body: DoorDashCreateDeliveryRequest = {
+              external_delivery_id,
+              pickup_address: input.pickup_address.trim(),
+              pickup_business_name: input.pickup_business_name.trim(),
+              pickup_phone_number: input.pickup_phone_number.trim(),
+              dropoff_address: input.dropoff_address.trim(),
+              dropoff_business_name: input.dropoff_business_name.trim(),
+              dropoff_phone_number: input.dropoff_phone_number.trim(),
+              order_value: orderValue,
+            };
+            if (
+              !body.pickup_address
+              || !body.pickup_business_name
+              || !body.pickup_phone_number
+              || !body.dropoff_address
+              || !body.dropoff_business_name
+              || !body.dropoff_phone_number
+            ) {
+              throw new Error('Pickup/dropoff address, business name, and phone fields must be non-empty');
+            }
+            if (input.pickup_instructions?.trim()) {
+              body.pickup_instructions = input.pickup_instructions.trim();
+            }
+            if (input.dropoff_instructions?.trim()) {
+              body.dropoff_instructions = input.dropoff_instructions.trim();
+            }
+            const result = await createDelivery(body);
+            console.log(`[claude] doordash_create_delivery ok ${external_delivery_id}`);
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: JSON.stringify({
+                ...result,
+                instruction:
+                  'Reply in a short, warm concierge tone. You may mention the delivery reference or status from this payload if it helps the guest; do not dump raw JSON.',
+              }),
+            });
+          } catch (error) {
+            const msg = error instanceof DoorDashApiError
+              ? error.message
+              : error instanceof Error
+                ? error.message
+                : 'Unknown error';
+            console.error('[claude] doordash_create_delivery error:', msg);
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: `Error creating DoorDash delivery: ${msg}`,
+              is_error: true,
+            });
+          }
+
         } else if (block.name === 'uber_ride_link') {
           const input = block.input as {
             dropoff_formatted_address?: string;
@@ -1073,6 +1200,8 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
         toolSummaryParts.push(`[signed out of resy]`);
       } else if (block.name === 'uber_ride_link') {
         toolSummaryParts.push(`[shared uber ride link]`);
+      } else if (block.name === 'doordash_create_delivery') {
+        toolSummaryParts.push(`[created doordash delivery]`);
       }
     }
     while (resyBookSummaryIdx < resyBookSummaries.length) {
