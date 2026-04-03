@@ -157,29 +157,48 @@ export async function sendReaction(
   };
 }
 
-export function verifyWebhookSignature(rawBody: string, signatureHeader: string | undefined): boolean {
-  const secret = process.env.BLOOIO_WEBHOOK_SECRET;
-  if (!secret || !signatureHeader) {
-    return false;
+export type WebhookSignatureResult = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Verifies Blooio webhook HMAC. Use `reason` when ok is false — common fixes:
+ * set BLOOIO_WEBHOOK_SECRET on Render to match Blooio Dashboard → Webhooks, or rotate secret on both sides.
+ */
+export function checkWebhookSignature(
+  rawBody: string,
+  signatureHeader: string | undefined,
+): WebhookSignatureResult {
+  const secret = process.env.BLOOIO_WEBHOOK_SECRET?.trim();
+  if (!secret) {
+    return {
+      ok: false,
+      reason:
+        'BLOOIO_WEBHOOK_SECRET is unset — add the webhook signing secret from Blooio Dashboard → Webhooks to Render env.',
+    };
+  }
+  if (!signatureHeader?.trim()) {
+    return { ok: false, reason: 'Missing X-Blooio-Signature header (request did not come from Blooio or proxy stripped headers).' };
   }
 
   const parts = signatureHeader.split(',');
   const tsPart = parts.find(p => p.startsWith('t='));
   const sigPart = parts.find(p => p.startsWith('v1='));
   if (!tsPart || !sigPart) {
-    return false;
+    return { ok: false, reason: 'Malformed X-Blooio-Signature (expected t=...,v1=...).' };
   }
 
   const timestamp = tsPart.slice(2);
   const signature = sigPart.slice(3);
   if (!/^\d+$/.test(timestamp) || !/^[a-f0-9]+$/i.test(signature)) {
-    return false;
+    return { ok: false, reason: 'Invalid timestamp or signature hex in X-Blooio-Signature.' };
   }
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const age = Math.abs(nowSeconds - Number(timestamp));
   if (age > FIVE_MINUTES_SECONDS) {
-    return false;
+    return {
+      ok: false,
+      reason: `Signature timestamp skew too large (${age}s > ${FIVE_MINUTES_SECONDS}s) — check server clock or replayed payload.`,
+    };
   }
 
   const expected = crypto
@@ -190,8 +209,24 @@ export function verifyWebhookSignature(rawBody: string, signatureHeader: string 
   const sigBuffer = Buffer.from(signature, 'hex');
   const expectedBuffer = Buffer.from(expected, 'hex');
   if (sigBuffer.length !== expectedBuffer.length) {
-    return false;
+    return {
+      ok: false,
+      reason:
+        'Signature length mismatch — BLOOIO_WEBHOOK_SECRET does not match Blooio (rotate in dashboard and paste new value into Render).',
+    };
   }
 
-  return crypto.timingSafeEqual(sigBuffer, expectedBuffer);
+  if (!crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
+    return {
+      ok: false,
+      reason:
+        'Signature mismatch — wrong webhook secret or body was altered (Blooio signs exact raw JSON bytes).',
+    };
+  }
+
+  return { ok: true };
+}
+
+export function verifyWebhookSignature(rawBody: string, signatureHeader: string | undefined): boolean {
+  return checkWebhookSignature(rawBody, signatureHeader).ok;
 }

@@ -38,7 +38,7 @@ vi.mock('../../auth/magicLink.js', () => ({
 
 vi.mock('../../blooio/client.js', () => ({
   sendMessage: vi.fn().mockResolvedValue({}),
-  verifyWebhookSignature: vi.fn().mockReturnValue(true),
+  checkWebhookSignature: vi.fn().mockReturnValue({ ok: true }),
 }));
 
 import { handler } from '../../handlers/receiver.js';

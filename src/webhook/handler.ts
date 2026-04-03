@@ -9,7 +9,7 @@ import {
 } from './types.js';
 import { redactPhone } from '../utils/redact.js';
 import { phonesMatch } from '../utils/phoneMatch.js';
-import { verifyWebhookSignature } from '../blooio/client.js';
+import { checkWebhookSignature } from '../blooio/client.js';
 
 export type MessageService = 'iMessage' | 'SMS' | 'RCS';
 
@@ -27,8 +27,9 @@ export function createWebhookHandler(onMessage: MessageHandler) {
   return async (req: Request, res: Response) => {
     const rawBody = ((req as Request & { rawBody?: string }).rawBody) ?? JSON.stringify(req.body ?? {});
     const signatureHeader = req.get('X-Blooio-Signature');
-    if (!verifyWebhookSignature(rawBody, signatureHeader)) {
-      console.error('[webhook] Invalid Blooio signature');
+    const sig = checkWebhookSignature(rawBody, signatureHeader);
+    if (!sig.ok) {
+      console.error(`[webhook] Invalid Blooio signature — ${sig.reason}`);
       res.status(401).json({ error: 'Invalid signature' });
       return;
     }
@@ -50,7 +51,12 @@ export function createWebhookHandler(onMessage: MessageHandler) {
 
       const chatId: string | undefined = event.external_id ?? event.sender;
       const from: string | undefined = event.sender;
-      const recipientPhone: string | undefined = event.internal_id;
+      const internalRaw = event.internal_id != null ? String(event.internal_id).trim() : '';
+      const recipientPhone: string | undefined =
+        internalRaw.length > 0 ? internalRaw : botNumber || undefined;
+      if (internalRaw.length === 0 && botNumber) {
+        console.log('[webhook] message.received had empty internal_id; using BLOOIO_PHONE_NUMBER as recipient');
+      }
       const messageId: string | undefined = event.message_id;
       const text = event.text ?? '';
       const attachments = Array.isArray(event.attachments) ? event.attachments : [];
@@ -103,7 +109,9 @@ export function createWebhookHandler(onMessage: MessageHandler) {
       const incomingReplyTo = undefined as ReplyTo | undefined;
 
       if (!text.trim() && images.length === 0 && audio.length === 0) {
-        console.log(`[webhook] Skipping empty message`);
+        console.log(
+          `[webhook] Skipping empty inbound (no text/images/audio) from ${redactPhone(from)} — tapbacks/reactions alone are ignored`,
+        );
         return;
       }
 

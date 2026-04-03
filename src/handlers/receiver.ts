@@ -22,7 +22,7 @@ import { verifyAuthToken, getAuthTokenChatId } from '../auth/db.js';
 import { verifyMagicLinkToken } from '../auth/magicLink.js';
 import { setCredentials, createUser, getUser } from '../auth/db.js';
 import { afterResyCredentialsLinked } from '../auth/afterResyLink.js';
-import { sendMessage, verifyWebhookSignature } from '../blooio/client.js';
+import { sendMessage, checkWebhookSignature } from '../blooio/client.js';
 import { redactPhone } from '../utils/redact.js';
 import { phonesMatch } from '../utils/phoneMatch.js';
 
@@ -68,7 +68,9 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
   if (!event.body) return json(400, { error: 'Missing body' });
   const rawBody = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString() : event.body;
   const signatureHeader = event.headers['x-blooio-signature'] ?? event.headers['X-Blooio-Signature'];
-  if (!verifyWebhookSignature(rawBody, signatureHeader)) {
+  const sig = checkWebhookSignature(rawBody, signatureHeader);
+  if (!sig.ok) {
+    console.error(`[webhook] Invalid Blooio signature — ${sig.reason}`);
     return json(401, { error: 'Invalid signature' });
   }
 
@@ -96,7 +98,13 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
   const botNumber = process.env.BLOOIO_PHONE_NUMBER?.trim();
   const chatId: string | undefined = webhookEvent.external_id ?? webhookEvent.sender;
   const from: string | undefined = webhookEvent.sender;
-  const recipientPhone: string | undefined = webhookEvent.internal_id;
+  const internalRaw =
+    webhookEvent.internal_id != null ? String(webhookEvent.internal_id).trim() : '';
+  const recipientPhone: string | undefined =
+    internalRaw.length > 0 ? internalRaw : botNumber || undefined;
+  if (internalRaw.length === 0 && botNumber) {
+    console.log('[webhook] message.received had empty internal_id; using BLOOIO_PHONE_NUMBER as recipient');
+  }
   const messageId: string | undefined = webhookEvent.message_id;
   const text = webhookEvent.text ?? '';
   const attachments = Array.isArray(webhookEvent.attachments) ? webhookEvent.attachments : [];
