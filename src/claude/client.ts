@@ -76,8 +76,12 @@ CRITICAL: Use "---" between segments so each part is sent as its own message. Ea
 - NO markdown: no bullets, numbered lists, headers, or bold in messages
 - Only ask a question when you truly cannot proceed without the answer
 - Do NOT send a progress line before searching — just search and respond with results
-- When listing options: at most 3; each one line: "<name> — <short descriptor>, <time or note>"
-- No filler ratings dumps or long paragraphs when listing spots
+- When presenting restaurant options, keep it conversational. No "Here are the top three:" or "I found these spots:" preambles. Just go straight into the options like a friend texting: "A few spots I'd recommend:" or jump right into the names
+- When listing options: at most 3, each on its own line. Use the restaurant name and a brief vibe or what it's known for — NOT ratings, numbers, or scores. Sound like a friend who knows the scene, not a search engine.
+  Good: "Sushi Izuki — intimate omakase, great for a date night"
+  Bad: "@SUSHI — exceptional omakase experience, 4.98 rating"
+- Never use "@" symbols in restaurant names unless that is the actual name displayed to guests
+- Never include numeric ratings (4.98, 4.5/5, etc.) — a concierge describes, they don't rank
 
 ## After a successful booking (signature move)
 Lead with assurance — e.g. "It's handled." Then the essentials (restaurant, time, party). Then the venue link in a separate bubble. Close with a single gracious line — e.g. whether you can perfect anything else for their evening.
@@ -109,14 +113,14 @@ function buildSystemPrompt(chatContext?: ChatContext): string {
   const now = new Date();
   const todayStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const upcomingDays: string[] = [];
-  for (let i = 0; i <= 90; i++) {
+  for (let i = 0; i <= 14; i++) {
     const d = new Date(now);
     d.setDate(d.getDate() + i);
     const label = i === 0 ? 'TODAY' : i === 1 ? 'TOMORROW' : '';
     const line = `${d.toLocaleDateString('en-US', { weekday: 'long' })} ${d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}${label ? ` (${label})` : ''}`;
     upcomingDays.push(line);
   }
-  prompt += `\n\n## Current date\nToday is ${todayStr}.\n\nUpcoming dates (use this reference — do NOT compute dates yourself):\n${upcomingDays.join('\n')}\n\nWhen the guest says "Monday", "this Sunday", "next Friday", etc., look up the EXACT date from the list above. Do not guess.`;
+  prompt += `\n\n## Current date\nToday is ${todayStr}.\n\nUpcoming dates (use this reference — do NOT compute dates yourself):\n${upcomingDays.join('\n')}\n\nWhen the guest says "Monday", "this Sunday", "next Friday", etc., look up the EXACT date from the list above. For dates beyond 2 weeks, compute from today's date. Do not guess.`;
 
   prompt += `\n\n## Payment setup link (stable login gateway — use verbatim when a card is required; avoid deep links)\n${getPaymentSetupUrl()}`;
 
@@ -1029,6 +1033,11 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
       }
     }
     let textResponse = finalTextParts.length > 0 ? finalTextParts.join('\n') : null;
+
+    // Strip internal tool-summary tags that Claude may parrot from conversation history
+    if (textResponse) {
+      textResponse = textResponse.replace(/\[(?:checked slots|searched resy|booked a reservation|resy_book|cancelled a reservation|checked upcoming reservations|checked resy profile|signed out of resy)[^\]]*\]\s*/g, '').trim() || null;
+    }
 
     // If the model skipped resy_book but the guest clearly picked a time after we showed slots, book deterministically.
     if (resyAuthToken && !bookingSucceeded && resyBookSummaries.length === 0) {
