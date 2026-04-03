@@ -130,6 +130,21 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Quick reachability check (open in browser while debugging; Blooio uses POST only)
+app.get('/blooio-webhook', (_req, res) => {
+  const base =
+    process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '') || process.env.BASE_URL?.replace(/\/$/, '') || '';
+  const postUrl = base.startsWith('http') ? `${base}/blooio-webhook` : null;
+  res.status(200).json({
+    ok: true,
+    message: 'POST is the Blooio webhook method. Paste postUrl into Blooio → Webhooks if missing or wrong.',
+    postUrl: postUrl ?? 'Set RENDER_EXTERNAL_URL (Render) or BASE_URL to show the full webhook URL here.',
+    blooioWebhookSecretSet: Boolean(process.env.BLOOIO_WEBHOOK_SECRET?.trim()),
+    blooioPhoneSet: Boolean(process.env.BLOOIO_PHONE_NUMBER?.trim()),
+    blooioApiKeySet: Boolean(process.env.BLOOIO_API_KEY?.trim()),
+  });
+});
+
 // Webhook endpoint for Blooio
 app.post(
   '/blooio-webhook',
@@ -607,23 +622,28 @@ app.post(
 // Only start Express server when NOT running inside Lambda
 if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
   app.listen(PORT, () => {
+    const renderUrl = process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '');
+    const baseUrl = process.env.BASE_URL?.replace(/\/$/, '');
+    const publicBase = renderUrl || baseUrl;
+    const secretOk = Boolean(process.env.BLOOIO_WEBHOOK_SECRET?.trim());
+    const phoneOk = Boolean(process.env.BLOOIO_PHONE_NUMBER?.trim());
     console.log(`
 ╔═══════════════════════════════════════════════════════╗
 ║             Blooio Bookings Agent                     ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Server running on http://localhost:${PORT}              ║
-║                                                       ║
-║  Endpoints:                                           ║
-║    POST /blooio-webhook - Blooio webhook receiver     ║
-║    GET  /health        - Health check                 ║
-║    GET  /auth/setup    - Onboarding page              ║
-║                                                       ║
-║  Next steps:                                          ║
-║    1. Run: ngrok http ${PORT}                            ║
-║    2. Configure webhook URL in Blooio                 ║
-║    3. Text your Blooio number!                        ║
-╚═══════════════════════════════════════════════════════╝
-    `);
+║  POST /blooio-webhook  GET /blooio-webhook (probe)    ║
+║  GET /health   GET /auth/setup                        ║
+╚═══════════════════════════════════════════════════════╝`);
+    if (publicBase) {
+      console.log(`[startup] Blooio webhook URL (must match dashboard): ${publicBase}/blooio-webhook`);
+    } else {
+      console.log('[startup] Set BASE_URL or RENDER_EXTERNAL_URL to log the full webhook URL');
+    }
+    console.log(
+      `[startup] BLOOIO_WEBHOOK_SECRET=${secretOk ? 'set' : 'MISSING — Blooio POSTs will get 401'}`,
+    );
+    console.log(`[startup] BLOOIO_PHONE_NUMBER=${phoneOk ? 'set' : 'MISSING'}`);
   });
 }
 
