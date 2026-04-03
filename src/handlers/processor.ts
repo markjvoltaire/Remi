@@ -16,6 +16,7 @@ import type { MessageReceivedEvent } from '../webhook/types.js';
 import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from '../blooio/client.js';
 import { chat, getGroupChatAction, getTextForEffect } from '../claude/client.js';
 import { getUserProfile, setUserName, addUserFact, addMessage } from '../state/conversation.js';
+import { runMessageParallelInit } from '../utils/messageParallelInit.js';
 import {
   getUser, createUser, loadUserContext, consumeJustOnboarded,
   setPendingOTP, getPendingOTP, clearPendingOTP,
@@ -114,13 +115,16 @@ async function processRecord(record: SQSRecord): Promise<void> {
 
   const shouldShareContact = count === 1 || count % CONTACT_CARD_INTERVAL === 0;
 
-  // Mark as read, start typing, get chat info, and fetch user profile in parallel
-  const parallelTasks: Promise<unknown>[] = [markAsRead(chatId), startTyping(chatId), getChat(chatId), getUserProfile(from)];
   if (shouldShareContact) {
     console.log(`[processor] Sharing contact card (message #${count})`);
-    parallelTasks.push(shareContactCard(chatId));
   }
-  const [, , chatInfo, senderProfile] = await Promise.all(parallelTasks) as [void, void, Awaited<ReturnType<typeof getChat>>, Awaited<ReturnType<typeof getUserProfile>>];
+  const { chatInfo, senderProfile } = await runMessageParallelInit(
+    chatId,
+    from,
+    shouldShareContact,
+    { markAsRead, startTyping, getChat, getUserProfile, shareContactCard },
+    '[processor]',
+  );
   console.log(`[timing] parallel init: ${Date.now() - start}ms`);
 
   if (senderProfile?.name) {

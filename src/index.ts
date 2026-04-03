@@ -34,6 +34,7 @@ import {
 } from './bookings/index.js';
 import { resyLinkMessages } from './auth/resyLinkMessages.js';
 import { redactPhone } from './utils/redact.js';
+import { runMessageParallelInit } from './utils/messageParallelInit.js';
 import { putItem } from './db/storage.js';
 
 // Clean up LLM response formatting quirks before sending
@@ -132,13 +133,16 @@ app.post(
     // Share contact card on first message or every N messages
     const shouldShareContact = count === 1 || count % CONTACT_CARD_INTERVAL === 0;
 
-    // Mark as read, start typing, get chat info, and fetch user profile in parallel
-    const parallelTasks: Promise<unknown>[] = [markAsRead(chatId), startTyping(chatId), getChat(chatId), getUserProfile(from)];
     if (shouldShareContact) {
       console.log(`[main] Sharing contact card (message #${count})`);
-      parallelTasks.push(shareContactCard(chatId));
     }
-    const [, , chatInfo, senderProfile] = await Promise.all(parallelTasks) as [void, void, Awaited<ReturnType<typeof getChat>>, Awaited<ReturnType<typeof getUserProfile>>];
+    const { chatInfo, senderProfile } = await runMessageParallelInit(
+      chatId,
+      from,
+      shouldShareContact,
+      { markAsRead, startTyping, getChat, getUserProfile, shareContactCard },
+      '[main]',
+    );
     console.log(`[timing] markAsRead+startTyping+getChat+getProfile${shouldShareContact ? '+shareContact' : ''}: ${Date.now() - start}ms`);
     if (senderProfile?.name) {
       console.log(`[main] Known user: ${senderProfile.name} (${senderProfile.facts.length} facts)`);

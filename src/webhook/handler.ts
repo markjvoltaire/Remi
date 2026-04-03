@@ -113,7 +113,12 @@ export function createWebhookHandler(onMessage: MessageHandler) {
       try {
         await onMessage(chatId, from, text, messageId, images, audio, incomingEffect ?? undefined, incomingReplyTo ?? undefined, service);
       } catch (error) {
-        console.error(`[webhook] Error handling message:`, error);
+        const message = error instanceof Error ? error.message : String(error);
+        const stack = error instanceof Error ? error.stack : undefined;
+        console.error(
+          `[webhook] Error handling message chat=${chatId} from=${redactPhone(from)} message_id=${messageId}: ${message}`,
+        );
+        if (stack) console.error(stack);
       }
     }
 
