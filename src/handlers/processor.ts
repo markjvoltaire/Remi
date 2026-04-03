@@ -15,13 +15,14 @@ import type { SQSHandler, SQSRecord } from 'aws-lambda';
 import type { MessageReceivedEvent } from '../webhook/types.js';
 import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from '../blooio/client.js';
 import { chat, getGroupChatAction, getTextForEffect } from '../claude/client.js';
-import { getUserProfile, setUserName, addMessage } from '../state/conversation.js';
+import { getUserProfile, setUserName, addUserFact, addMessage } from '../state/conversation.js';
 import {
   getUser, createUser, loadUserContext, consumeJustOnboarded,
   setPendingOTP, getPendingOTP, clearPendingOTP,
   setPendingChallenge, getPendingChallenge, clearPendingChallenge,
   setCredentials, clearSignedOut,
   afterResyCredentialsLinked,
+  getProfileOnboarding, setProfileOnboarding,
 } from '../auth/index.js';
 import {
   sendResyOTP,
@@ -37,6 +38,10 @@ import { redactPhone } from '../utils/redact.js';
 import { getItem, putItem } from '../db/storage.js';
 
 const CONTACT_CARD_INTERVAL = 5;
+
+function normalizeOnboardingAnswer(text: string): string {
+  return text.trim().replace(/\s+/g, ' ');
+}
 
 function cleanResponse(text: string): string {
   return text
@@ -124,6 +129,65 @@ async function processRecord(record: SQSRecord): Promise<void> {
 
   const isGroupChat = chatInfo.handles.length > 2;
   const participantNames = chatInfo.handles.map(h => h.handle);
+
+  // ── Profile onboarding (name/city/dietary) ─────────────────────────
+  // Run before Resy auth so first-time users get a conversational intro.
+  const user = await getUser(from);
+  let onboarding = await getProfileOnboarding(from);
+
+  if (!onboarding) {
+    if (!user) {
+      await createUser(from);
+    }
+    await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
+    await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await sendMessage(chatId, `whats your name?`);
+    return;
+  }
+
+  if (!onboarding.completed) {
+    const answer = normalizeOnboardingAnswer(text);
+    if (!answer) {
+      await sendMessage(chatId, `sorry, i missed that — can you send that again?`);
+      return;
+    }
+
+    if (onboarding.stage === 'ask_name') {
+      await setUserName(from, answer);
+      await setProfileOnboarding(from, { stage: 'ask_city', name: answer, completed: false });
+      await sendMessage(chatId, `good to meet you ${answer}.`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await sendMessage(chatId, `what city are you in?`);
+      return;
+    }
+
+    if (onboarding.stage === 'ask_city') {
+      await addUserFact(from, `City: ${answer}`);
+      await setProfileOnboarding(from, { stage: 'ask_diet', city: answer, completed: false });
+      await sendMessage(chatId, `any food you dont eat?`);
+      return;
+    }
+
+    if (onboarding.stage === 'ask_neighborhood') {
+      await setProfileOnboarding(from, { stage: 'ask_diet', completed: false });
+      await sendMessage(chatId, `any food you dont eat?`);
+      return;
+    }
+
+    if (onboarding.stage === 'ask_diet') {
+      const normalized = answer.toLowerCase();
+      const dietaryFact = /not really|none|nope|anything|no\b/.test(normalized)
+        ? 'Dietary restrictions: none'
+        : `Dietary restrictions: ${answer}`;
+      await addUserFact(from, dietaryFact);
+      await setProfileOnboarding(from, { stage: 'complete', dietary: answer, completed: true });
+      await sendMessage(chatId, `youre all set.`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await sendMessage(chatId, `just tell me what you need.`);
+      return;
+    }
+  }
 
   // ── Inline JWT auth ─────────────────────────────────────────────────
   const trimmedText = text.trim();
