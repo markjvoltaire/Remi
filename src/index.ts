@@ -87,67 +87,24 @@ async function bumpAndGetChatCount(chatId: string): Promise<{ prev: number; coun
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Parse JSON bodies (cap at 50KB to prevent abuse — PEM keys are ~2KB)
-app.use(express.json({
-  limit: '50kb',
-  verify: (req, _res, buf) => {
-    (req as { rawBody?: string }).rawBody = buf.toString('utf8');
-  },
-}));
-
-// Security headers on all responses
-app.use((_req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  if (process.env.NODE_ENV === 'production') {
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+function attachBlooioRawBody(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  const buf = req.body;
+  const raw = Buffer.isBuffer(buf) ? buf.toString('utf8') : '';
+  (req as express.Request & { rawBody?: string }).rawBody = raw;
+  try {
+    req.body = raw.length > 0 ? JSON.parse(raw) : {};
+  } catch {
+    res.status(400).json({ error: 'Invalid JSON' });
+    return;
   }
   next();
-});
-
-// HTTPS enforcement in production (behind proxy like Railway/ngrok)
-if (process.env.NODE_ENV === 'production') {
-  app.use((req, res, next) => {
-    if (req.headers['x-forwarded-proto'] === 'http') {
-      res.redirect(301, `https://${req.headers.host}${req.url}`);
-      return;
-    }
-    next();
-  });
 }
 
-// Serve static assets (fonts, images) — public/ lives at project root
-app.use(express.static(path.join(process.cwd(), 'public')));
-
-// Auth routes (onboarding page + credential submission)
-app.use(authRoutes);
-
-// Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Quick reachability check (open in browser while debugging; Blooio uses POST only)
-app.get('/blooio-webhook', (_req, res) => {
-  const base =
-    process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '') || process.env.BASE_URL?.replace(/\/$/, '') || '';
-  const postUrl = base.startsWith('http') ? `${base}/blooio-webhook` : null;
-  res.status(200).json({
-    ok: true,
-    message: 'POST is the Blooio webhook method. Paste postUrl into Blooio → Webhooks if missing or wrong.',
-    postUrl: postUrl ?? 'Set RENDER_EXTERNAL_URL (Render) or BASE_URL to show the full webhook URL here.',
-    blooioWebhookSecretSet: Boolean(process.env.BLOOIO_WEBHOOK_SECRET?.trim()),
-    blooioPhoneSet: Boolean(process.env.BLOOIO_PHONE_NUMBER?.trim()),
-    blooioApiKeySet: Boolean(process.env.BLOOIO_API_KEY?.trim()),
-  });
-});
-
-// Webhook endpoint for Blooio
+// Blooio webhook: raw body only (HMAC = sha256 over exact bytes; express.json breaks verification)
 app.post(
   '/blooio-webhook',
+  express.raw({ limit: '50kb', type: '*/*' }),
+  attachBlooioRawBody,
   createWebhookHandler(async (chatId, from, text, messageId, images, audio, incomingEffect, incomingReplyTo, service) => {
     const start = Date.now();
     console.log(`[main] Processing message from ${redactPhone(from)}`);
@@ -618,6 +575,65 @@ app.post(
     console.log(`[main] Reply sent to ${redactPhone(from)}`);
   })
 );
+// Parse JSON bodies (cap at 50KB to prevent abuse — PEM keys are ~2KB)
+app.use(express.json({
+  limit: '50kb',
+  verify: (req, _res, buf) => {
+    (req as { rawBody?: string }).rawBody = buf.toString('utf8');
+  },
+}));
+
+// Security headers on all responses
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
+
+// HTTPS enforcement in production (behind proxy like Railway/ngrok)
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] === 'http') {
+      res.redirect(301, `https://${req.headers.host}${req.url}`);
+      return;
+    }
+    next();
+  });
+}
+
+// Serve static assets (fonts, images) — public/ lives at project root
+app.use(express.static(path.join(process.cwd(), 'public')));
+
+// Auth routes (onboarding page + credential submission)
+app.use(authRoutes);
+
+// Health check
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Quick reachability check (open in browser while debugging; Blooio uses POST only)
+app.get('/blooio-webhook', (_req, res) => {
+  const base =
+    process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '') || process.env.BASE_URL?.replace(/\/$/, '') || '';
+  const postUrl = base.startsWith('http') ? `${base}/blooio-webhook` : null;
+  res.status(200).json({
+    ok: true,
+    message: 'POST is the Blooio webhook method. Paste postUrl into Blooio → Webhooks if missing or wrong.',
+    postUrl: postUrl ?? 'Set RENDER_EXTERNAL_URL (Render) or BASE_URL to show the full webhook URL here.',
+    blooioWebhookSecretSet: Boolean(process.env.BLOOIO_WEBHOOK_SECRET?.trim()),
+    blooioPhoneSet: Boolean(process.env.BLOOIO_PHONE_NUMBER?.trim()),
+    blooioApiKeySet: Boolean(process.env.BLOOIO_API_KEY?.trim()),
+  });
+});
+
+
 
 // Only start Express server when NOT running inside Lambda
 if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
