@@ -8,6 +8,7 @@ import {
   ReplyTo,
 } from './types.js';
 import { redactPhone } from '../utils/redact.js';
+import { phonesMatch } from '../utils/phoneMatch.js';
 import { verifyWebhookSignature } from '../blooio/client.js';
 
 export type MessageService = 'iMessage' | 'SMS' | 'RCS';
@@ -60,28 +61,32 @@ export function createWebhookHandler(onMessage: MessageHandler) {
           : 'iMessage';
 
       if (!chatId || !from || !recipientPhone || !messageId) {
-        console.error(`[webhook] Unexpected message.received payload shape (missing required fields)`);
+        console.error(
+          `[webhook] Unexpected message.received payload shape — has chatId=${!!chatId} from=${!!from} internal_id=${!!recipientPhone} message_id=${!!messageId}`,
+        );
         return;
       }
 
-      // Only process messages sent to this bot's phone number
-      if (botNumber && recipientPhone !== botNumber) {
-        console.log(`[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot's number)`);
+      // Only process messages sent to this bot's phone number (digits match: +1… vs 1… etc.)
+      if (botNumber && !phonesMatch(recipientPhone, botNumber)) {
+        console.log(
+          `[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot; expect ${redactPhone(botNumber)})`,
+        );
         return;
       }
-      if (botNumber && from === botNumber) {
+      if (botNumber && phonesMatch(from, botNumber)) {
         console.log('[webhook] Skipping own message');
         return;
       }
 
-      // If ALLOWED_SENDERS is set, only respond to those numbers
-      if (allowedSenders.length > 0 && !allowedSenders.includes(from)) {
+      // If ALLOWED_SENDERS is set, only respond to these numbers
+      if (allowedSenders.length > 0 && !allowedSenders.some((a) => phonesMatch(a, from))) {
         console.log(`[webhook] Skipping ${redactPhone(from)} (not in allowed senders)`);
         return;
       }
 
       // Skip messages from ignored senders
-      if (ignoredSenders.includes(from)) {
+      if (ignoredSenders.some((i) => phonesMatch(i, from))) {
         console.log(`[webhook] Skipping ${redactPhone(from)} (ignored sender)`);
         return;
       }

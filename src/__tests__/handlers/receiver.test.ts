@@ -129,6 +129,19 @@ describe('receiver handler', () => {
     process.env.BLOOIO_PHONE_NUMBER = '';
   });
 
+  it('POST /blooio-webhook enqueues when internal_id format differs from BLOOIO_PHONE_NUMBER digits', async () => {
+    process.env.BLOOIO_PHONE_NUMBER = '+12068070349';
+    const result = await handler(makeEvent({
+      method: 'POST',
+      path: '/blooio-webhook',
+      body: makeWebhookBody({ internal_id: '12068070349', sender: '+14155551234' }),
+    }));
+
+    expect(result.statusCode).toBe(200);
+    expect(mockSqsSend).toHaveBeenCalledTimes(1);
+    process.env.BLOOIO_PHONE_NUMBER = '';
+  });
+
   it('POST /blooio-webhook skips ignored senders', async () => {
     const result = await handler(makeEvent({
       method: 'POST',

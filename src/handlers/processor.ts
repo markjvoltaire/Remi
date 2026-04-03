@@ -64,6 +64,18 @@ async function setChatMessageCount(chatId: string, count: number): Promise<void>
   await putItem(`CHATCOUNT#${chatId}`, 'CHATCOUNT', { count }, 7 * 24 * 60 * 60);
 }
 
+async function bumpAndGetChatCount(chatId: string): Promise<{ prev: number; count: number }> {
+  try {
+    const prev = await getChatMessageCount(chatId);
+    const count = prev + 1;
+    await setChatMessageCount(chatId, count);
+    return { prev, count };
+  } catch (e) {
+    console.warn('[processor] chat message count failed (non-fatal):', e);
+    return { prev: 0, count: 1 };
+  }
+}
+
 export const handler: SQSHandler = async (event) => {
   for (const record of event.Records) {
     try {
@@ -108,11 +120,24 @@ async function processRecord(record: SQSRecord): Promise<void> {
   const start = Date.now();
   console.log(`[processor] Processing message from ${redactPhone(from)}`);
 
-  // Track message count for this chat
-  const prevCount = await getChatMessageCount(chatId);
-  const count = prevCount + 1;
-  await setChatMessageCount(chatId, count);
+  const user = await getUser(from);
+  let onboarding = await getProfileOnboarding(from);
+  if (!onboarding) {
+    if (!user) await createUser(from);
+    await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
+    await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await sendMessage(chatId, `whats your name?`);
+    try {
+      const prev = await getChatMessageCount(chatId);
+      await setChatMessageCount(chatId, prev + 1);
+    } catch (e) {
+      console.warn('[processor] chat count after intro (non-fatal):', e);
+    }
+    return;
+  }
 
+  const { prev: prevCount, count } = await bumpAndGetChatCount(chatId);
   const shouldShareContact = count === 1 || count % CONTACT_CARD_INTERVAL === 0;
 
   if (shouldShareContact) {
@@ -135,21 +160,6 @@ async function processRecord(record: SQSRecord): Promise<void> {
   const participantNames = chatInfo.handles.map(h => h.handle);
 
   // ── Profile onboarding (name/city/dietary) ─────────────────────────
-  // Run before Resy auth so first-time users get a conversational intro.
-  const user = await getUser(from);
-  let onboarding = await getProfileOnboarding(from);
-
-  if (!onboarding) {
-    if (!user) {
-      await createUser(from);
-    }
-    await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
-    await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
-    await new Promise(resolve => setTimeout(resolve, 500));
-    await sendMessage(chatId, `whats your name?`);
-    return;
-  }
-
   if (!onboarding.completed) {
     const answer = normalizeOnboardingAnswer(text);
     if (!answer) {

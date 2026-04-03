@@ -72,6 +72,18 @@ async function setChatMessageCount(chatId: string, count: number): Promise<void>
   await putItem(`CHATCOUNT#${chatId}`, 'CHATCOUNT', { count }, 7 * 24 * 60 * 60); // 7 day TTL
 }
 
+async function bumpAndGetChatCount(chatId: string): Promise<{ prev: number; count: number }> {
+  try {
+    const prev = await getChatMessageCount(chatId);
+    const count = prev + 1;
+    await setChatMessageCount(chatId, count);
+    return { prev, count };
+  } catch (e) {
+    console.warn('[main] chat message count failed (non-fatal):', e);
+    return { prev: 0, count: 1 };
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -125,12 +137,25 @@ app.post(
     const start = Date.now();
     console.log(`[main] Processing message from ${redactPhone(from)}`);
 
-    // Track message count for this chat
-    const prevCount = await getChatMessageCount(chatId);
-    const count = prevCount + 1;
-    await setChatMessageCount(chatId, count);
+    // First-time users: reply before chat-count storage or Blooio read — avoids silent failure on Supabase/read errors
+    const user = await getUser(from);
+    let onboarding = await getProfileOnboarding(from);
+    if (!onboarding) {
+      if (!user) await createUser(from);
+      await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
+      await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await sendMessage(chatId, `whats your name?`);
+      try {
+        const prev = await getChatMessageCount(chatId);
+        await setChatMessageCount(chatId, prev + 1);
+      } catch (e) {
+        console.warn('[main] chat count after intro (non-fatal):', e);
+      }
+      return;
+    }
 
-    // Share contact card on first message or every N messages
+    const { prev: prevCount, count } = await bumpAndGetChatCount(chatId);
     const shouldShareContact = count === 1 || count % CONTACT_CARD_INTERVAL === 0;
 
     if (shouldShareContact) {
@@ -153,21 +178,6 @@ app.post(
     const participantNames = chatInfo.handles.map(h => h.handle);
 
     // ── Profile onboarding (name/city/neighborhood/dietary) ───────────────
-    // Run this before Resy OTP auth flow so first-time users get a conversational intro.
-    const user = await getUser(from);
-    let onboarding = await getProfileOnboarding(from);
-
-    if (!onboarding) {
-      if (!user) {
-        await createUser(from);
-      }
-      await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
-      await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await sendMessage(chatId, `whats your name?`);
-      return;
-    }
-
     if (!onboarding.completed) {
       const answer = normalizeOnboardingAnswer(text);
       if (!answer) {
