@@ -468,6 +468,13 @@ async function processRecord(record: SQSRecord): Promise<void> {
     finalText = `renamed the chat to "${renameChat}" 😎`;
   }
 
+  // Avoid silent no-op: if Claude produced no text, send a fallback
+  // In DMs, reaction-only is not enough — always include a text reply
+  if (!finalText && (!reaction || !isGroupChat)) {
+    finalText = `hey — i'm here. what are you trying to book? (city, date, party size)`;
+    console.log(`[processor] Claude returned no text${reaction ? ' (reaction-only in DM)' : ''}; sending fallback`);
+  }
+
   if (finalText) {
     const messages = finalText.split('---').map(m => cleanResponse(m)).filter(m => m.length > 0);
     const replyTo = incomingReplyTo ? { message_id: messageId } : undefined;

@@ -546,10 +546,11 @@ app.post(
       console.log(`[main] Claude saved user info without text response (no auto-ack)`);
     }
 
-    // Avoid silent no-op: if Claude produced no text/effect/reaction, send a small fallback
-    if (!finalText && !reaction) {
-      finalText = `hey — i’m here. what are you trying to book? (city, date, party size)`;
-      console.log(`[main] Claude returned no text/reaction; sending fallback`);
+    // Avoid silent no-op: if Claude produced no text, send a fallback
+    // In DMs, reaction-only is not enough — always include a text reply
+    if (!finalText && (!reaction || !isGroupChat)) {
+      finalText = `hey — i'm here. what are you trying to book? (city, date, party size)`;
+      console.log(`[main] Claude returned no text${reaction ? ' (reaction-only in DM)' : ''}; sending fallback`);
     }
 
     if (finalText) {
