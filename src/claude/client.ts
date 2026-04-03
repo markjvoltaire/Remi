@@ -102,11 +102,18 @@ function getPaymentSetupUrl(): string {
 function buildSystemPrompt(chatContext?: ChatContext): string {
   let prompt = SYSTEM_PROMPT;
 
-  // Inject current date/time so Claude can resolve "this Sunday", "tomorrow", "next Friday", etc.
+  // Inject current date + upcoming calendar so Claude doesn't have to do date math
   const now = new Date();
-  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const todayStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-  prompt += `\n\n## Current date and time\nToday is ${todayStr}. Day of week: ${dayNames[now.getDay()]}. Use this to resolve relative dates like "this Sunday", "tomorrow", "next Friday", etc. Always compute the correct calendar date from this reference point.`;
+  const upcomingDays: string[] = [];
+  for (let i = 0; i <= 13; i++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + i);
+    const label = i === 0 ? 'TODAY' : i === 1 ? 'TOMORROW' : '';
+    const line = `${d.toLocaleDateString('en-US', { weekday: 'long' })} ${d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}${label ? ` (${label})` : ''}`;
+    upcomingDays.push(line);
+  }
+  prompt += `\n\n## Current date\nToday is ${todayStr}.\n\nUpcoming dates (use this reference — do NOT compute dates yourself):\n${upcomingDays.join('\n')}\n\nWhen the guest says "Monday", "this Sunday", "next Friday", etc., look up the EXACT date from the list above. Do not guess.`;
 
   prompt += `\n\n## Payment setup link (stable login gateway — use verbatim when a card is required; avoid deep links)\n${getPaymentSetupUrl()}`;
 
