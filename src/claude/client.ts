@@ -106,7 +106,7 @@ function buildSystemPrompt(chatContext?: ChatContext): string {
   const now = new Date();
   const todayStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const upcomingDays: string[] = [];
-  for (let i = 0; i <= 13; i++) {
+  for (let i = 0; i <= 90; i++) {
     const d = new Date(now);
     d.setDate(d.getDate() + i);
     const label = i === 0 ? 'TODAY' : i === 1 ? 'TOMORROW' : '';
@@ -596,6 +596,58 @@ function parsePendingSlotCheckFromHistory(messages: StoredMessage[]): { venueId:
   return null;
 }
 
+/**
+ * Validate and correct a date string (YYYY-MM-DD) against the user's message.
+ * If the user said a day name (e.g. "Monday") but Claude computed the wrong date,
+ * find the nearest correct date for that day name.
+ */
+function correctDateFromMessage(date: string, recentMessages: string[]): string {
+  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const recentText = recentMessages.join(' ').toLowerCase();
+
+  // Find which day name the user mentioned
+  let mentionedDay: number | null = null;
+  for (let i = 0; i < dayNames.length; i++) {
+    if (recentText.includes(dayNames[i])) {
+      mentionedDay = i;
+      break;
+    }
+  }
+
+  // Also check "tomorrow"
+  if (recentText.includes('tomorrow')) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+    if (date !== tomorrowStr) {
+      console.log(`[date-fix] User said "tomorrow" but Claude passed ${date}, correcting to ${tomorrowStr}`);
+      return tomorrowStr;
+    }
+    return date;
+  }
+
+  if (mentionedDay === null) return date;
+
+  // Check if Claude's date actually falls on the mentioned day
+  const parsed = new Date(date + 'T12:00:00');
+  if (parsed.getDay() === mentionedDay) return date; // Correct!
+
+  // Wrong day — find the next occurrence of the mentioned day from today
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  for (let offset = 0; offset <= 90; offset++) {
+    const candidate = new Date(today);
+    candidate.setDate(candidate.getDate() + offset);
+    if (candidate.getDay() === mentionedDay) {
+      const corrected = candidate.toISOString().slice(0, 10);
+      console.log(`[date-fix] User said "${dayNames[mentionedDay]}" but Claude passed ${date} (${dayNames[parsed.getDay()]}), correcting to ${corrected}`);
+      return corrected;
+    }
+  }
+
+  return date;
+}
+
 /** Parses common guest times (e.g. "6:00 pm", "18:30") to HH:MM 24h for Resy. */
 function parseGuestTimeToHHMM(message: string): string | null {
   const t = message.trim().toLowerCase();
@@ -781,6 +833,9 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
 
         } else if (block.name === 'resy_find_slots') {
           const input = block.input as { venue_id: number; date: string; party_size: number; lat?: number; lng?: number };
+          const recentUserMsgs = history.filter(m => m.role === 'user').slice(-5).map(m => m.content);
+          recentUserMsgs.push(userMessage);
+          input.date = correctDateFromMessage(input.date, recentUserMsgs);
           const tentativeVenueId = resolveVenueFromSelection(chatId, venueThreadText, input.venue_id);
           const finalVenueId = coerceVenueToCachedOnly(chatId, venueThreadText, tentativeVenueId);
           if (finalVenueId === null) {
@@ -813,6 +868,9 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
 
         } else if (block.name === 'resy_book') {
           const input = block.input as { venue_id: number; date: string; party_size: number; time?: string };
+          const recentUserMsgsBook = history.filter(m => m.role === 'user').slice(-5).map(m => m.content);
+          recentUserMsgsBook.push(userMessage);
+          input.date = correctDateFromMessage(input.date, recentUserMsgsBook);
           try {
             const tentativeVenueId = resolveVenueFromSelection(chatId, venueThreadText, input.venue_id);
             const finalVenueId = coerceVenueToCachedOnly(chatId, venueThreadText, tentativeVenueId);
