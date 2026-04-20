@@ -34,7 +34,6 @@ import {
 } from './bookings/index.js';
 import { resyLinkMessages } from './auth/resyLinkMessages.js';
 import { redactPhone } from './utils/redact.js';
-import { runMessageParallelInit } from './utils/messageParallelInit.js';
 import { putItem } from './db/storage.js';
 
 // Clean up LLM response formatting quirks before sending
@@ -72,74 +71,74 @@ async function setChatMessageCount(chatId: string, count: number): Promise<void>
   await putItem(`CHATCOUNT#${chatId}`, 'CHATCOUNT', { count }, 7 * 24 * 60 * 60); // 7 day TTL
 }
 
-async function bumpAndGetChatCount(chatId: string): Promise<{ prev: number; count: number }> {
-  try {
-    const prev = await getChatMessageCount(chatId);
-    const count = prev + 1;
-    await setChatMessageCount(chatId, count);
-    return { prev, count };
-  } catch (e) {
-    console.warn('[main] chat message count failed (non-fatal):', e);
-    return { prev: 0, count: 1 };
-  }
-}
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-function attachBlooioRawBody(req: express.Request, res: express.Response, next: express.NextFunction): void {
-  const buf = req.body;
-  const raw = Buffer.isBuffer(buf) ? buf.toString('utf8') : '';
-  (req as express.Request & { rawBody?: string }).rawBody = raw;
-  try {
-    req.body = raw.length > 0 ? JSON.parse(raw) : {};
-  } catch {
-    res.status(400).json({ error: 'Invalid JSON' });
-    return;
+// Parse JSON bodies (cap at 50KB to prevent abuse — PEM keys are ~2KB)
+app.use(express.json({
+  limit: '50kb',
+  verify: (req, _res, buf) => {
+    (req as { rawBody?: string }).rawBody = buf.toString('utf8');
+  },
+}));
+
+// Security headers on all responses
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
   next();
+});
+
+// HTTPS enforcement in production (behind proxy like Railway/ngrok)
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] === 'http') {
+      res.redirect(301, `https://${req.headers.host}${req.url}`);
+      return;
+    }
+    next();
+  });
 }
 
-// Blooio webhook: raw body only (HMAC = sha256 over exact bytes; express.json breaks verification)
+// Serve static assets (fonts, images) — public/ lives at project root
+app.use(express.static(path.join(process.cwd(), 'public')));
+
+// Auth routes (onboarding page + credential submission)
+app.use(authRoutes);
+
+// Health check
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Webhook endpoint for Blooio
 app.post(
   '/blooio-webhook',
-  express.raw({ limit: '50kb', type: '*/*' }),
-  attachBlooioRawBody,
   createWebhookHandler(async (chatId, from, text, messageId, images, audio, incomingEffect, incomingReplyTo, service) => {
     const start = Date.now();
     console.log(`[main] Processing message from ${redactPhone(from)}`);
 
-    // First-time users: reply before chat-count storage or Blooio read — avoids silent failure on Supabase/read errors
-    const user = await getUser(from);
-    let onboarding = await getProfileOnboarding(from);
-    if (!onboarding) {
-      if (!user) await createUser(from);
-      await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
-      await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await sendMessage(chatId, `whats your name?`);
-      try {
-        const prev = await getChatMessageCount(chatId);
-        await setChatMessageCount(chatId, prev + 1);
-      } catch (e) {
-        console.warn('[main] chat count after intro (non-fatal):', e);
-      }
-      return;
-    }
+    // Track message count for this chat
+    const prevCount = await getChatMessageCount(chatId);
+    const count = prevCount + 1;
+    await setChatMessageCount(chatId, count);
 
-    const { prev: prevCount, count } = await bumpAndGetChatCount(chatId);
+    // Share contact card on first message or every N messages
     const shouldShareContact = count === 1 || count % CONTACT_CARD_INTERVAL === 0;
 
+    // Mark as read, start typing, get chat info, and fetch user profile in parallel
+    const parallelTasks: Promise<unknown>[] = [markAsRead(chatId), startTyping(chatId), getChat(chatId), getUserProfile(from)];
     if (shouldShareContact) {
       console.log(`[main] Sharing contact card (message #${count})`);
+      parallelTasks.push(shareContactCard(chatId));
     }
-    const { chatInfo, senderProfile } = await runMessageParallelInit(
-      chatId,
-      from,
-      shouldShareContact,
-      { markAsRead, startTyping, getChat, getUserProfile, shareContactCard },
-      '[main]',
-    );
+    const [, , chatInfo, senderProfile] = await Promise.all(parallelTasks) as [void, void, Awaited<ReturnType<typeof getChat>>, Awaited<ReturnType<typeof getUserProfile>>];
     console.log(`[timing] markAsRead+startTyping+getChat+getProfile${shouldShareContact ? '+shareContact' : ''}: ${Date.now() - start}ms`);
     if (senderProfile?.name) {
       console.log(`[main] Known user: ${senderProfile.name} (${senderProfile.facts.length} facts)`);
@@ -150,6 +149,21 @@ app.post(
     const participantNames = chatInfo.handles.map(h => h.handle);
 
     // ── Profile onboarding (name/city/neighborhood/dietary) ───────────────
+    // Run this before Resy OTP auth flow so first-time users get a conversational intro.
+    const user = await getUser(from);
+    let onboarding = await getProfileOnboarding(from);
+
+    if (!onboarding) {
+      if (!user) {
+        await createUser(from);
+      }
+      await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
+      await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await sendMessage(chatId, `whats your name?`);
+      return;
+    }
+
     if (!onboarding.completed) {
       const answer = normalizeOnboardingAnswer(text);
       if (!answer) {
@@ -532,11 +546,10 @@ app.post(
       console.log(`[main] Claude saved user info without text response (no auto-ack)`);
     }
 
-    // Avoid silent no-op: if Claude produced no text, send a fallback
-    // In DMs, reaction-only is not enough — always include a text reply
-    if (!finalText && (!reaction || !isGroupChat)) {
-      finalText = `hey — i'm here. what are you trying to book? (city, date, party size)`;
-      console.log(`[main] Claude returned no text${reaction ? ' (reaction-only in DM)' : ''}; sending fallback`);
+    // Avoid silent no-op: if Claude produced no text/effect/reaction, send a small fallback
+    if (!finalText && !reaction) {
+      finalText = `hey — i’m here. what are you trying to book? (city, date, party size)`;
+      console.log(`[main] Claude returned no text/reaction; sending fallback`);
     }
 
     if (finalText) {
@@ -575,91 +588,27 @@ app.post(
     console.log(`[main] Reply sent to ${redactPhone(from)}`);
   })
 );
-// Parse JSON bodies (cap at 50KB to prevent abuse — PEM keys are ~2KB)
-app.use(express.json({
-  limit: '50kb',
-  verify: (req, _res, buf) => {
-    (req as { rawBody?: string }).rawBody = buf.toString('utf8');
-  },
-}));
-
-// Security headers on all responses
-app.use((_req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  if (process.env.NODE_ENV === 'production') {
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  }
-  next();
-});
-
-// HTTPS enforcement in production (behind proxy like Railway/ngrok)
-if (process.env.NODE_ENV === 'production') {
-  app.use((req, res, next) => {
-    if (req.headers['x-forwarded-proto'] === 'http') {
-      res.redirect(301, `https://${req.headers.host}${req.url}`);
-      return;
-    }
-    next();
-  });
-}
-
-// Serve static assets (fonts, images) — public/ lives at project root
-app.use(express.static(path.join(process.cwd(), 'public')));
-
-// Auth routes (onboarding page + credential submission)
-app.use(authRoutes);
-
-// Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Quick reachability check (open in browser while debugging; Blooio uses POST only)
-app.get('/blooio-webhook', (_req, res) => {
-  const base =
-    process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '') || process.env.BASE_URL?.replace(/\/$/, '') || '';
-  const postUrl = base.startsWith('http') ? `${base}/blooio-webhook` : null;
-  res.status(200).json({
-    ok: true,
-    message: 'POST is the Blooio webhook method. Paste postUrl into Blooio → Webhooks if missing or wrong.',
-    postUrl: postUrl ?? 'Set RENDER_EXTERNAL_URL (Render) or BASE_URL to show the full webhook URL here.',
-    blooioWebhookSecretSet: Boolean(process.env.BLOOIO_WEBHOOK_SECRET?.trim()),
-    blooioPhoneSet: Boolean(process.env.BLOOIO_PHONE_NUMBER?.trim()),
-    blooioApiKeySet: Boolean(process.env.BLOOIO_API_KEY?.trim()),
-  });
-});
-
-
 
 // Only start Express server when NOT running inside Lambda
 if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
   app.listen(PORT, () => {
-    const renderUrl = process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '');
-    const baseUrl = process.env.BASE_URL?.replace(/\/$/, '');
-    const publicBase = renderUrl || baseUrl;
-    const secretOk = Boolean(process.env.BLOOIO_WEBHOOK_SECRET?.trim());
-    const phoneOk = Boolean(process.env.BLOOIO_PHONE_NUMBER?.trim());
     console.log(`
 ╔═══════════════════════════════════════════════════════╗
 ║             Blooio Bookings Agent                     ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Server running on http://localhost:${PORT}              ║
-║  POST /blooio-webhook  GET /blooio-webhook (probe)    ║
-║  GET /health   GET /auth/setup                        ║
-╚═══════════════════════════════════════════════════════╝`);
-    if (publicBase) {
-      console.log(`[startup] Blooio webhook URL (must match dashboard): ${publicBase}/blooio-webhook`);
-    } else {
-      console.log('[startup] Set BASE_URL or RENDER_EXTERNAL_URL to log the full webhook URL');
-    }
-    console.log(
-      `[startup] BLOOIO_WEBHOOK_SECRET=${secretOk ? 'set' : 'MISSING — Blooio POSTs will get 401'}`,
-    );
-    console.log(`[startup] BLOOIO_PHONE_NUMBER=${phoneOk ? 'set' : 'MISSING'}`);
+║                                                       ║
+║  Endpoints:                                           ║
+║    POST /blooio-webhook - Blooio webhook receiver     ║
+║    GET  /health        - Health check                 ║
+║    GET  /auth/setup    - Onboarding page              ║
+║                                                       ║
+║  Next steps:                                          ║
+║    1. Run: ngrok http ${PORT}                            ║
+║    2. Configure webhook URL in Blooio                 ║
+║    3. Text your Blooio number!                        ║
+╚═══════════════════════════════════════════════════════╝
+    `);
   });
 }
 

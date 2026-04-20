@@ -1,5 +1,5 @@
 import type { User, BookingsCredentials } from './types.js';
-import { getUser, getCredentials, updateLastActive, createUser } from './db.js';
+import { getUser, getCredentials, updateLastActive, createUser, isSignedOut } from './db.js';
 import { redactPhone } from '../utils/redact.js';
 
 export interface UserContext {
@@ -23,9 +23,8 @@ export function isResySharedTokenMode(): boolean {
  *
  * Priority:
  * 1. Per-user encrypted credentials (from onboarding)
- * 2. Env-level RESY_AUTH_TOKEN — same JWT for every sender (not tied to SMS number). Dev/demo;
- *    leave empty in production if each guest must use their own Resy.
- * 3. null → cannot book until personal credentials or house token is configured
+ * 2. Env-level RESY_AUTH_TOKEN fallback (skip OTP when set — dev/demo only; leave empty in production)
+ * 3. null → triggers onboarding flow
  */
 export async function loadUserContext(phoneNumber: string): Promise<UserContext | null> {
   let user = await getUser(phoneNumber);
@@ -41,8 +40,8 @@ export async function loadUserContext(phoneNumber: string): Promise<UserContext 
 
   const envResyAuthToken = getEnvResyAuthToken();
 
-  // Fallback: shared house token for any phone (sign-out only clears stored creds, not this path)
-  if (envResyAuthToken) {
+  // Fallback: house account token — lets unlinked users book immediately
+  if (envResyAuthToken && !(await isSignedOut(phoneNumber))) {
     if (!user) {
       user = await createUser(phoneNumber);
     }

@@ -4,12 +4,14 @@ const mockGetUser = vi.fn();
 const mockGetCredentials = vi.fn();
 const mockUpdateLastActive = vi.fn();
 const mockCreateUser = vi.fn();
+const mockIsSignedOut = vi.fn();
 
 vi.mock('../../auth/db.js', () => ({
   getUser: (...args: unknown[]) => mockGetUser(...args),
   getCredentials: (...args: unknown[]) => mockGetCredentials(...args),
   updateLastActive: (...args: unknown[]) => mockUpdateLastActive(...args),
   createUser: (...args: unknown[]) => mockCreateUser(...args),
+  isSignedOut: (...args: unknown[]) => mockIsSignedOut(...args),
 }));
 
 beforeEach(() => {
@@ -19,6 +21,7 @@ beforeEach(() => {
   mockGetCredentials.mockReset();
   mockUpdateLastActive.mockReset();
   mockCreateUser.mockReset();
+  mockIsSignedOut.mockReset();
 });
 
 // Must import after mocks are set up.
@@ -42,6 +45,7 @@ describe('loadUserContext', () => {
 
   it('returns null when no user and no env token', async () => {
     mockGetUser.mockResolvedValue(null);
+    mockIsSignedOut.mockResolvedValue(false);
 
     const { loadUserContext } = await import('../../auth/userContext.js');
     const ctx = await loadUserContext('+2222');
@@ -59,11 +63,13 @@ describe('loadUserContext', () => {
       getCredentials: mockGetCredentials,
       updateLastActive: mockUpdateLastActive,
       createUser: mockCreateUser,
+      isSignedOut: mockIsSignedOut,
     }));
 
     const user = { phoneNumber: '+3333', createdAt: new Date(), lastActive: new Date(), onboardingComplete: false };
     mockGetUser.mockResolvedValue(user);
     mockGetCredentials.mockResolvedValue(null); // No per-user creds
+    mockIsSignedOut.mockResolvedValue(false);
     mockUpdateLastActive.mockResolvedValue(undefined);
 
     const { loadUserContext } = await import('../../auth/userContext.js');
@@ -73,7 +79,7 @@ describe('loadUserContext', () => {
     expect(ctx!.isHouseAccount).toBe(true);
   });
 
-  it('still uses house RESY_AUTH_TOKEN after sign-out (token is shared, not per SMS number)', async () => {
+  it('returns null when user signed out (even with env token)', async () => {
     vi.stubEnv('RESY_AUTH_TOKEN', 'env_tok_present');
     vi.resetModules();
 
@@ -82,18 +88,17 @@ describe('loadUserContext', () => {
       getCredentials: mockGetCredentials,
       updateLastActive: mockUpdateLastActive,
       createUser: mockCreateUser,
+      isSignedOut: mockIsSignedOut,
     }));
 
     const user = { phoneNumber: '+4444', createdAt: new Date(), lastActive: new Date(), onboardingComplete: false };
     mockGetUser.mockResolvedValue(user);
     mockGetCredentials.mockResolvedValue(null);
-    mockUpdateLastActive.mockResolvedValue(undefined);
+    mockIsSignedOut.mockResolvedValue(true); // Signed out!
 
     const { loadUserContext } = await import('../../auth/userContext.js');
     const ctx = await loadUserContext('+4444');
-    expect(ctx).not.toBeNull();
-    expect(ctx!.bookingsCredentials.resyAuthToken).toBe('env_tok_present');
-    expect(ctx!.isHouseAccount).toBe(true);
+    expect(ctx).toBeNull();
   });
 
   it('creates user when env token exists but no user record', async () => {
@@ -105,11 +110,13 @@ describe('loadUserContext', () => {
       getCredentials: mockGetCredentials,
       updateLastActive: mockUpdateLastActive,
       createUser: mockCreateUser,
+      isSignedOut: mockIsSignedOut,
     }));
 
     const newUser = { phoneNumber: '+5555', createdAt: new Date(), lastActive: new Date(), onboardingComplete: false };
     mockGetUser.mockResolvedValue(null); // No user
     mockGetCredentials.mockResolvedValue(null);
+    mockIsSignedOut.mockResolvedValue(false);
     mockCreateUser.mockResolvedValue(newUser);
     mockUpdateLastActive.mockResolvedValue(undefined);
 

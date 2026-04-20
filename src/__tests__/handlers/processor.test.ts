@@ -49,14 +49,9 @@ vi.mock('../../claude/client.js', () => ({
 const mockGetUserProfile = vi.fn().mockResolvedValue(null);
 const mockAddMessage = vi.fn().mockResolvedValue(undefined);
 
-const mockSetUserName = vi.fn().mockResolvedValue(true);
-const mockAddUserFact = vi.fn().mockResolvedValue(true);
-
 vi.mock('../../state/conversation.js', () => ({
   getUserProfile: (...args: unknown[]) => mockGetUserProfile(...args),
   addMessage: (...args: unknown[]) => mockAddMessage(...args),
-  setUserName: (...args: unknown[]) => mockSetUserName(...args),
-  addUserFact: (...args: unknown[]) => mockAddUserFact(...args),
 }));
 
 const mockGetUser = vi.fn().mockResolvedValue(null);
@@ -72,12 +67,6 @@ const mockClearPendingChallenge = vi.fn().mockResolvedValue(undefined);
 const mockSetCredentials = vi.fn().mockResolvedValue(undefined);
 const mockClearSignedOut = vi.fn().mockResolvedValue(undefined);
 const mockAfterResyCredentialsLinked = vi.fn().mockResolvedValue(undefined);
-const mockGetProfileOnboarding = vi.fn().mockResolvedValue({
-  stage: 'complete' as const,
-  completed: true,
-  updatedAt: new Date().toISOString(),
-});
-const mockSetProfileOnboarding = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('../../auth/index.js', () => ({
   getUser: (...args: unknown[]) => mockGetUser(...args),
@@ -93,8 +82,6 @@ vi.mock('../../auth/index.js', () => ({
   setCredentials: (...args: unknown[]) => mockSetCredentials(...args),
   clearSignedOut: (...args: unknown[]) => mockClearSignedOut(...args),
   afterResyCredentialsLinked: (...args: unknown[]) => mockAfterResyCredentialsLinked(...args),
-  getProfileOnboarding: (...args: unknown[]) => mockGetProfileOnboarding(...args),
-  setProfileOnboarding: (...args: unknown[]) => mockSetProfileOnboarding(...args),
 }));
 
 const mockSendResyOTP = vi.fn().mockResolvedValue('sms');
@@ -207,11 +194,6 @@ beforeEach(() => {
   });
   mockRecordPaymentSnapshotTransition.mockReturnValue({ paymentBecameAvailable: false });
   mockAfterResyCredentialsLinked.mockResolvedValue(undefined);
-  mockGetProfileOnboarding.mockResolvedValue({
-    stage: 'complete',
-    completed: true,
-    updatedAt: new Date().toISOString(),
-  });
 });
 
 describe('processor handler', () => {

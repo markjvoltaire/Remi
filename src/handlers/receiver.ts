@@ -22,9 +22,8 @@ import { verifyAuthToken, getAuthTokenChatId } from '../auth/db.js';
 import { verifyMagicLinkToken } from '../auth/magicLink.js';
 import { setCredentials, createUser, getUser } from '../auth/db.js';
 import { afterResyCredentialsLinked } from '../auth/afterResyLink.js';
-import { sendMessage, checkWebhookSignature } from '../blooio/client.js';
+import { sendMessage, verifyWebhookSignature } from '../blooio/client.js';
 import { redactPhone } from '../utils/redact.js';
-import { phonesMatch } from '../utils/phoneMatch.js';
 
 const sqs = new SQSClient({});
 const QUEUE_URL = process.env.SQS_QUEUE_URL!;
@@ -68,9 +67,7 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
   if (!event.body) return json(400, { error: 'Missing body' });
   const rawBody = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString() : event.body;
   const signatureHeader = event.headers['x-blooio-signature'] ?? event.headers['X-Blooio-Signature'];
-  const sig = checkWebhookSignature(rawBody, signatureHeader);
-  if (!sig.ok) {
-    console.error(`[webhook] Invalid Blooio signature — ${sig.reason}`);
+  if (!verifyWebhookSignature(rawBody, signatureHeader)) {
     return json(401, { error: 'Invalid signature' });
   }
 
@@ -98,40 +95,30 @@ async function handleWebhook(event: APIGatewayProxyEventV2): Promise<APIGatewayP
   const botNumber = process.env.BLOOIO_PHONE_NUMBER?.trim();
   const chatId: string | undefined = webhookEvent.external_id ?? webhookEvent.sender;
   const from: string | undefined = webhookEvent.sender;
-  const internalRaw =
-    webhookEvent.internal_id != null ? String(webhookEvent.internal_id).trim() : '';
-  const recipientPhone: string | undefined =
-    internalRaw.length > 0 ? internalRaw : botNumber || undefined;
-  if (internalRaw.length === 0 && botNumber) {
-    console.log('[webhook] message.received had empty internal_id; using BLOOIO_PHONE_NUMBER as recipient');
-  }
+  const recipientPhone: string | undefined = webhookEvent.internal_id;
   const messageId: string | undefined = webhookEvent.message_id;
   const text = webhookEvent.text ?? '';
   const attachments = Array.isArray(webhookEvent.attachments) ? webhookEvent.attachments : [];
 
   if (!chatId || !from || !recipientPhone || !messageId) {
-    console.error(
-      `[webhook] Unexpected message.received payload shape — has chatId=${!!chatId} from=${!!from} internal_id=${!!recipientPhone} message_id=${!!messageId}`,
-    );
+    console.error(`[webhook] Unexpected message.received payload shape (missing required fields)`);
     return json(200, { received: true });
   }
 
-  // Filter checks (same logic as webhook/handler.ts; digits match +1… vs 1…)
-  if (botNumber && !phonesMatch(recipientPhone, botNumber)) {
-    console.log(
-      `[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot; expect ${redactPhone(botNumber)})`,
-    );
+  // Filter checks (same logic as webhook/handler.ts)
+  if (botNumber && recipientPhone !== botNumber) {
+    console.log(`[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot's number)`);
     return json(200, { received: true });
   }
-  if (botNumber && phonesMatch(from, botNumber)) {
+  if (botNumber && from === botNumber) {
     console.log('[webhook] Skipping own message');
     return json(200, { received: true });
   }
-  if (allowedSenders.length > 0 && !allowedSenders.some((a) => phonesMatch(a, from))) {
+  if (allowedSenders.length > 0 && !allowedSenders.includes(from)) {
     console.log(`[webhook] Skipping ${redactPhone(from)} (not in allowed senders)`);
     return json(200, { received: true });
   }
-  if (ignoredSenders.some((i) => phonesMatch(i, from))) {
+  if (ignoredSenders.includes(from)) {
     console.log(`[webhook] Skipping ${redactPhone(from)} (ignored sender)`);
     return json(200, { received: true });
   }

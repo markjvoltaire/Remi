@@ -38,7 +38,7 @@ vi.mock('../../auth/magicLink.js', () => ({
 
 vi.mock('../../blooio/client.js', () => ({
   sendMessage: vi.fn().mockResolvedValue({}),
-  checkWebhookSignature: vi.fn().mockReturnValue({ ok: true }),
+  verifyWebhookSignature: vi.fn().mockReturnValue(true),
 }));
 
 import { handler } from '../../handlers/receiver.js';
@@ -126,19 +126,6 @@ describe('receiver handler', () => {
 
     expect(result.statusCode).toBe(200);
     expect(mockSqsSend).not.toHaveBeenCalled();
-    process.env.BLOOIO_PHONE_NUMBER = '';
-  });
-
-  it('POST /blooio-webhook enqueues when internal_id format differs from BLOOIO_PHONE_NUMBER digits', async () => {
-    process.env.BLOOIO_PHONE_NUMBER = '+12068070349';
-    const result = await handler(makeEvent({
-      method: 'POST',
-      path: '/blooio-webhook',
-      body: makeWebhookBody({ internal_id: '12068070349', sender: '+14155551234' }),
-    }));
-
-    expect(result.statusCode).toBe(200);
-    expect(mockSqsSend).toHaveBeenCalledTimes(1);
     process.env.BLOOIO_PHONE_NUMBER = '';
   });
 

@@ -15,15 +15,13 @@ import type { SQSHandler, SQSRecord } from 'aws-lambda';
 import type { MessageReceivedEvent } from '../webhook/types.js';
 import { sendMessage, markAsRead, startTyping, sendReaction, shareContactCard, getChat, renameGroupChat } from '../blooio/client.js';
 import { chat, getGroupChatAction, getTextForEffect } from '../claude/client.js';
-import { getUserProfile, setUserName, addUserFact, addMessage } from '../state/conversation.js';
-import { runMessageParallelInit } from '../utils/messageParallelInit.js';
+import { getUserProfile, setUserName, addMessage } from '../state/conversation.js';
 import {
   getUser, createUser, loadUserContext, consumeJustOnboarded,
   setPendingOTP, getPendingOTP, clearPendingOTP,
   setPendingChallenge, getPendingChallenge, clearPendingChallenge,
   setCredentials, clearSignedOut,
   afterResyCredentialsLinked,
-  getProfileOnboarding, setProfileOnboarding,
 } from '../auth/index.js';
 import {
   sendResyOTP,
@@ -39,10 +37,6 @@ import { redactPhone } from '../utils/redact.js';
 import { getItem, putItem } from '../db/storage.js';
 
 const CONTACT_CARD_INTERVAL = 5;
-
-function normalizeOnboardingAnswer(text: string): string {
-  return text.trim().replace(/\s+/g, ' ');
-}
 
 function cleanResponse(text: string): string {
   return text
@@ -62,18 +56,6 @@ async function getChatMessageCount(chatId: string): Promise<number> {
 
 async function setChatMessageCount(chatId: string, count: number): Promise<void> {
   await putItem(`CHATCOUNT#${chatId}`, 'CHATCOUNT', { count }, 7 * 24 * 60 * 60);
-}
-
-async function bumpAndGetChatCount(chatId: string): Promise<{ prev: number; count: number }> {
-  try {
-    const prev = await getChatMessageCount(chatId);
-    const count = prev + 1;
-    await setChatMessageCount(chatId, count);
-    return { prev, count };
-  } catch (e) {
-    console.warn('[processor] chat message count failed (non-fatal):', e);
-    return { prev: 0, count: 1 };
-  }
 }
 
 export const handler: SQSHandler = async (event) => {
@@ -120,36 +102,20 @@ async function processRecord(record: SQSRecord): Promise<void> {
   const start = Date.now();
   console.log(`[processor] Processing message from ${redactPhone(from)}`);
 
-  const user = await getUser(from);
-  let onboarding = await getProfileOnboarding(from);
-  if (!onboarding) {
-    if (!user) await createUser(from);
-    await setProfileOnboarding(from, { stage: 'ask_name', completed: false });
-    await sendMessage(chatId, `hey. im remi — a personal concierge by text.`);
-    await new Promise(resolve => setTimeout(resolve, 500));
-    await sendMessage(chatId, `whats your name?`);
-    try {
-      const prev = await getChatMessageCount(chatId);
-      await setChatMessageCount(chatId, prev + 1);
-    } catch (e) {
-      console.warn('[processor] chat count after intro (non-fatal):', e);
-    }
-    return;
-  }
+  // Track message count for this chat
+  const prevCount = await getChatMessageCount(chatId);
+  const count = prevCount + 1;
+  await setChatMessageCount(chatId, count);
 
-  const { prev: prevCount, count } = await bumpAndGetChatCount(chatId);
   const shouldShareContact = count === 1 || count % CONTACT_CARD_INTERVAL === 0;
 
+  // Mark as read, start typing, get chat info, and fetch user profile in parallel
+  const parallelTasks: Promise<unknown>[] = [markAsRead(chatId), startTyping(chatId), getChat(chatId), getUserProfile(from)];
   if (shouldShareContact) {
     console.log(`[processor] Sharing contact card (message #${count})`);
+    parallelTasks.push(shareContactCard(chatId));
   }
-  const { chatInfo, senderProfile } = await runMessageParallelInit(
-    chatId,
-    from,
-    shouldShareContact,
-    { markAsRead, startTyping, getChat, getUserProfile, shareContactCard },
-    '[processor]',
-  );
+  const [, , chatInfo, senderProfile] = await Promise.all(parallelTasks) as [void, void, Awaited<ReturnType<typeof getChat>>, Awaited<ReturnType<typeof getUserProfile>>];
   console.log(`[timing] parallel init: ${Date.now() - start}ms`);
 
   if (senderProfile?.name) {
@@ -158,50 +124,6 @@ async function processRecord(record: SQSRecord): Promise<void> {
 
   const isGroupChat = chatInfo.handles.length > 2;
   const participantNames = chatInfo.handles.map(h => h.handle);
-
-  // ── Profile onboarding (name/city/dietary) ─────────────────────────
-  if (!onboarding.completed) {
-    const answer = normalizeOnboardingAnswer(text);
-    if (!answer) {
-      await sendMessage(chatId, `sorry, i missed that — can you send that again?`);
-      return;
-    }
-
-    if (onboarding.stage === 'ask_name') {
-      await setUserName(from, answer);
-      await setProfileOnboarding(from, { stage: 'ask_city', name: answer, completed: false });
-      await sendMessage(chatId, `good to meet you ${answer}.`);
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await sendMessage(chatId, `what city are you in?`);
-      return;
-    }
-
-    if (onboarding.stage === 'ask_city') {
-      await addUserFact(from, `City: ${answer}`);
-      await setProfileOnboarding(from, { stage: 'ask_diet', city: answer, completed: false });
-      await sendMessage(chatId, `any food you dont eat?`);
-      return;
-    }
-
-    if (onboarding.stage === 'ask_neighborhood') {
-      await setProfileOnboarding(from, { stage: 'ask_diet', completed: false });
-      await sendMessage(chatId, `any food you dont eat?`);
-      return;
-    }
-
-    if (onboarding.stage === 'ask_diet') {
-      const normalized = answer.toLowerCase();
-      const dietaryFact = /not really|none|nope|anything|no\b/.test(normalized)
-        ? 'Dietary restrictions: none'
-        : `Dietary restrictions: ${answer}`;
-      await addUserFact(from, dietaryFact);
-      await setProfileOnboarding(from, { stage: 'complete', dietary: answer, completed: true });
-      await sendMessage(chatId, `youre all set.`);
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await sendMessage(chatId, `just tell me what you need.`);
-      return;
-    }
-  }
 
   // ── Inline JWT auth ─────────────────────────────────────────────────
   const trimmedText = text.trim();
@@ -480,13 +402,6 @@ async function processRecord(record: SQSRecord): Promise<void> {
   }
   if (!finalText && renameChat && isGroupChat) {
     finalText = `renamed the chat to "${renameChat}" 😎`;
-  }
-
-  // Avoid silent no-op: if Claude produced no text, send a fallback
-  // In DMs, reaction-only is not enough — always include a text reply
-  if (!finalText && (!reaction || !isGroupChat)) {
-    finalText = `hey — i'm here. what are you trying to book? (city, date, party size)`;
-    console.log(`[processor] Claude returned no text${reaction ? ' (reaction-only in DM)' : ''}; sending fallback`);
   }
 
   if (finalText) {

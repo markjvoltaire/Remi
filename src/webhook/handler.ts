@@ -8,8 +8,7 @@ import {
   ReplyTo,
 } from './types.js';
 import { redactPhone } from '../utils/redact.js';
-import { phonesMatch } from '../utils/phoneMatch.js';
-import { checkWebhookSignature } from '../blooio/client.js';
+import { verifyWebhookSignature } from '../blooio/client.js';
 
 export type MessageService = 'iMessage' | 'SMS' | 'RCS';
 
@@ -27,9 +26,8 @@ export function createWebhookHandler(onMessage: MessageHandler) {
   return async (req: Request, res: Response) => {
     const rawBody = ((req as Request & { rawBody?: string }).rawBody) ?? JSON.stringify(req.body ?? {});
     const signatureHeader = req.get('X-Blooio-Signature');
-    const sig = checkWebhookSignature(rawBody, signatureHeader);
-    if (!sig.ok) {
-      console.error(`[webhook] Invalid Blooio signature — ${sig.reason}`);
+    if (!verifyWebhookSignature(rawBody, signatureHeader)) {
+      console.error('[webhook] Invalid Blooio signature');
       res.status(401).json({ error: 'Invalid signature' });
       return;
     }
@@ -51,12 +49,7 @@ export function createWebhookHandler(onMessage: MessageHandler) {
 
       const chatId: string | undefined = event.external_id ?? event.sender;
       const from: string | undefined = event.sender;
-      const internalRaw = event.internal_id != null ? String(event.internal_id).trim() : '';
-      const recipientPhone: string | undefined =
-        internalRaw.length > 0 ? internalRaw : botNumber || undefined;
-      if (internalRaw.length === 0 && botNumber) {
-        console.log('[webhook] message.received had empty internal_id; using BLOOIO_PHONE_NUMBER as recipient');
-      }
+      const recipientPhone: string | undefined = event.internal_id;
       const messageId: string | undefined = event.message_id;
       const text = event.text ?? '';
       const attachments = Array.isArray(event.attachments) ? event.attachments : [];
@@ -67,32 +60,28 @@ export function createWebhookHandler(onMessage: MessageHandler) {
           : 'iMessage';
 
       if (!chatId || !from || !recipientPhone || !messageId) {
-        console.error(
-          `[webhook] Unexpected message.received payload shape — has chatId=${!!chatId} from=${!!from} internal_id=${!!recipientPhone} message_id=${!!messageId}`,
-        );
+        console.error(`[webhook] Unexpected message.received payload shape (missing required fields)`);
         return;
       }
 
-      // Only process messages sent to this bot's phone number (digits match: +1… vs 1… etc.)
-      if (botNumber && !phonesMatch(recipientPhone, botNumber)) {
-        console.log(
-          `[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot; expect ${redactPhone(botNumber)})`,
-        );
+      // Only process messages sent to this bot's phone number
+      if (botNumber && recipientPhone !== botNumber) {
+        console.log(`[webhook] Skipping message to ${redactPhone(recipientPhone)} (not this bot's number)`);
         return;
       }
-      if (botNumber && phonesMatch(from, botNumber)) {
+      if (botNumber && from === botNumber) {
         console.log('[webhook] Skipping own message');
         return;
       }
 
-      // If ALLOWED_SENDERS is set, only respond to these numbers
-      if (allowedSenders.length > 0 && !allowedSenders.some((a) => phonesMatch(a, from))) {
+      // If ALLOWED_SENDERS is set, only respond to those numbers
+      if (allowedSenders.length > 0 && !allowedSenders.includes(from)) {
         console.log(`[webhook] Skipping ${redactPhone(from)} (not in allowed senders)`);
         return;
       }
 
       // Skip messages from ignored senders
-      if (ignoredSenders.some((i) => phonesMatch(i, from))) {
+      if (ignoredSenders.includes(from)) {
         console.log(`[webhook] Skipping ${redactPhone(from)} (ignored sender)`);
         return;
       }
@@ -109,9 +98,7 @@ export function createWebhookHandler(onMessage: MessageHandler) {
       const incomingReplyTo = undefined as ReplyTo | undefined;
 
       if (!text.trim() && images.length === 0 && audio.length === 0) {
-        console.log(
-          `[webhook] Skipping empty inbound (no text/images/audio) from ${redactPhone(from)} — tapbacks/reactions alone are ignored`,
-        );
+        console.log(`[webhook] Skipping empty message`);
         return;
       }
 
@@ -126,12 +113,7 @@ export function createWebhookHandler(onMessage: MessageHandler) {
       try {
         await onMessage(chatId, from, text, messageId, images, audio, incomingEffect ?? undefined, incomingReplyTo ?? undefined, service);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const stack = error instanceof Error ? error.stack : undefined;
-        console.error(
-          `[webhook] Error handling message chat=${chatId} from=${redactPhone(from)} message_id=${messageId}: ${message}`,
-        );
-        if (stack) console.error(stack);
+        console.error(`[webhook] Error handling message:`, error);
       }
     }
 
