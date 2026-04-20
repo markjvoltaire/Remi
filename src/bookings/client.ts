@@ -248,7 +248,7 @@ export async function bookReservation(
   const paymentMethod = userData.payment_methods?.find(pm => pm.is_default) || userData.payment_methods?.[0];
   if (!paymentMethod) {
     throw new Error(
-      'No payment method on file. Sign in at https://resy.com/login, add a card under your profile, then try again.',
+      "No payment method on file with our reservation partner. Sign in at https://resy.com/login, add a card under your profile, then try again.",
     );
   }
   console.log(`[resy] Using payment method ${paymentMethod.id}`);
@@ -657,33 +657,49 @@ export async function registerResyUser(
   ];
 
   for (const endpoint of endpoints) {
-    console.log(`[resy] Trying registration via ${endpoint}`);
+    console.log(`[resy][register] attempt endpoint=${endpoint} firstNameProvided=${Boolean(firstName)} emailProvided=${Boolean(email)}`);
 
-    const res = await fetch(`${RESY_BASE_URL}${endpoint}`, {
-      method: 'POST',
-      headers: RESY_PRE_AUTH_HEADERS,
-      body: new URLSearchParams(userFields).toString(),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${RESY_BASE_URL}${endpoint}`, {
+        method: 'POST',
+        headers: RESY_PRE_AUTH_HEADERS,
+        body: new URLSearchParams(userFields).toString(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[resy][register] endpoint=${endpoint} status=network_error error=${msg}`);
+      continue;
+    }
 
     const text = await res.text();
-    console.log(`[resy] ${endpoint} response (${res.status}):`, text.substring(0, 1000));
+    let parsed: Record<string, any> | null = null;
+    let parseError = false;
+    try {
+      parsed = JSON.parse(text) as Record<string, any>;
+    } catch {
+      parseError = true;
+    }
 
-    if (res.ok) {
-      try {
-        const data = JSON.parse(text) as Record<string, any>;
-        const token = data.token || data.auth_token || data.access_token;
-        if (token) {
-          console.log(`[resy] Registration succeeded via ${endpoint}!`);
-          return token;
-        }
-        console.log(`[resy] ${endpoint} keys:`, Object.keys(data));
-      } catch {
-        console.error(`[resy] Could not parse ${endpoint} response`);
-      }
+    const token = parsed?.token || parsed?.auth_token || parsed?.access_token || null;
+    const gotToken = Boolean(token);
+    const responseKeys = parsed ? Object.keys(parsed).join(',') : '';
+
+    console.log(
+      `[resy][register] endpoint=${endpoint} status=${res.status} ok=${res.ok} gotToken=${gotToken} parseError=${parseError} keys=${responseKeys}`,
+    );
+
+    if (!res.ok || parseError) {
+      console.log(`[resy][register] endpoint=${endpoint} bodySnippet=${text.substring(0, 500)}`);
+    }
+
+    if (res.ok && gotToken) {
+      console.log(`[resy][register] success endpoint=${endpoint}`);
+      return token as string;
     }
   }
 
-  console.error(`[resy] All registration endpoints failed`);
+  console.error(`[resy][register] all endpoints failed`);
   return null;
 }
 

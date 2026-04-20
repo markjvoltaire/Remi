@@ -45,10 +45,13 @@
     "@aws-sdk/client-dynamodb": "^3.700.0",
     "@aws-sdk/client-sqs": "^3.700.0",
     "@aws-sdk/lib-dynamodb": "^3.700.0",
+    "@browserbasehq/sdk": "^2.10.0",
+    "@browserbasehq/stagehand": "^3.2.1",
     "@supabase/supabase-js": "^2.7.2",
     "dotenv": "^17.2.3",
     "express": "^4.21.0",
     "jsonwebtoken": "^9.0.3",
+    "playwright-core": "^1.59.1",
     "stripe": "^17.7.0"
   },
   "devDependencies": {

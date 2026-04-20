@@ -67,6 +67,7 @@ const mockClearPendingChallenge = vi.fn().mockResolvedValue(undefined);
 const mockSetCredentials = vi.fn().mockResolvedValue(undefined);
 const mockClearSignedOut = vi.fn().mockResolvedValue(undefined);
 const mockAfterResyCredentialsLinked = vi.fn().mockResolvedValue(undefined);
+const mockGetProfileOnboarding = vi.fn().mockResolvedValue(null);
 
 vi.mock('../../auth/index.js', () => ({
   getUser: (...args: unknown[]) => mockGetUser(...args),
@@ -79,9 +80,12 @@ vi.mock('../../auth/index.js', () => ({
   setPendingChallenge: (...args: unknown[]) => mockSetPendingChallenge(...args),
   getPendingChallenge: (...args: unknown[]) => mockGetPendingChallenge(...args),
   clearPendingChallenge: (...args: unknown[]) => mockClearPendingChallenge(...args),
+  getPendingCloudBrowserOtp: vi.fn().mockResolvedValue(null),
+  clearPendingCloudBrowserOtp: vi.fn().mockResolvedValue(undefined),
   setCredentials: (...args: unknown[]) => mockSetCredentials(...args),
   clearSignedOut: (...args: unknown[]) => mockClearSignedOut(...args),
   afterResyCredentialsLinked: (...args: unknown[]) => mockAfterResyCredentialsLinked(...args),
+  getProfileOnboarding: (...args: unknown[]) => mockGetProfileOnboarding(...args),
 }));
 
 const mockSendResyOTP = vi.fn().mockResolvedValue('sms');
@@ -104,6 +108,14 @@ vi.mock('../../bookings/index.js', () => ({
   verifyPaymentStatus: (...args: unknown[]) => mockVerifyPaymentStatus(...args),
   recordPaymentSnapshotTransition: (...args: unknown[]) => mockRecordPaymentSnapshotTransition(...args),
   messageSuggestsBookingIntent: (...args: unknown[]) => mockMessageSuggestsBookingIntent(...args),
+}));
+
+vi.mock('../../cloudBrowser/index.js', () => ({
+  ingestOtpCode: vi.fn(),
+  isCloudBrowserReady: vi.fn().mockReturnValue(false),
+  runPaymentHandoff: vi.fn().mockResolvedValue(null),
+  makeLivePaymentHandoffDeps: vi.fn(() => ({})),
+  makeLiveSmsBridge: vi.fn(() => ({})),
 }));
 
 // Mock storage getItem/putItem for chat count
@@ -168,6 +180,7 @@ beforeEach(() => {
   mockGetPendingOTP.mockResolvedValue(null);
   mockGetPendingChallenge.mockResolvedValue(null);
   mockGetUserProfile.mockResolvedValue(null);
+  mockGetProfileOnboarding.mockResolvedValue(null);
   // Restore default 1:1 chat (2 handles = not a group)
   mockGetChat.mockResolvedValue({
     id: 'chat_1',
@@ -234,19 +247,100 @@ describe('processor handler', () => {
     expect(mockSetCredentials).toHaveBeenCalledWith('+14155551234', { resyAuthToken: 'resy_tok_from_challenge' });
   });
 
-  it('no house account and no credentials sends fallback message (no forced OTP)', async () => {
+  it('new-user OTP challenge (isNewUser:true) routes to signup and does not set pending challenge', async () => {
+    mockGetPendingOTP.mockResolvedValue({ chatId: 'chat_1', sentAt: new Date() });
+    mockVerifyResyOTP.mockResolvedValue({
+      challenge: {
+        claimToken: 'ct_new',
+        challengeId: '',
+        mobileNumber: '+14155551234',
+        firstName: '',
+        isNewUser: true,
+        requiredFields: [{ name: 'em_address', type: 'email', message: 'Email address' }],
+      },
+    });
+
+    await handler(makeSQSEvent('123456'), dummyContext, () => {});
+
+    expect(mockSetPendingChallenge).not.toHaveBeenCalled();
+    expect(mockClearPendingOTP).toHaveBeenCalledWith('+14155551234');
+    const sentTexts = mockSendMessage.mock.calls.map(call => call[1]);
+    expect(sentTexts).toContain(
+      "Looks like you're new to our reservation partner. One-time setup before I can book for you. Create an account at https://resy.com/signup and add a card to your profile (about 60 seconds).",
+    );
+    expect(sentTexts.some(t => typeof t === 'string' && t.includes("text to me"))).toBe(true);
+  });
+
+  it('existing-user OTP challenge (isNewUser:false) still prompts for email and stores pending challenge', async () => {
+    mockGetPendingOTP.mockResolvedValue({ chatId: 'chat_1', sentAt: new Date() });
+    mockVerifyResyOTP.mockResolvedValue({
+      challenge: {
+        claimToken: 'ct_existing',
+        challengeId: 'ch_1',
+        mobileNumber: '+14155551234',
+        firstName: 'Alice',
+        isNewUser: false,
+        requiredFields: [{ name: 'em_address', type: 'email', message: 'Email address' }],
+      },
+    });
+
+    await handler(makeSQSEvent('123456'), dummyContext, () => {});
+
+    expect(mockSetPendingChallenge).toHaveBeenCalledWith(
+      '+14155551234',
+      expect.objectContaining({ isNewUser: false, firstName: 'Alice' }),
+    );
+    const sentTexts = mockSendMessage.mock.calls.map(call => call[1]);
+    expect(sentTexts.some(t => typeof t === 'string' && t.includes('which email is on file'))).toBe(true);
+  });
+
+  it('profile onboarding name is threaded into registerResyUser', async () => {
+    mockGetPendingChallenge.mockResolvedValue({
+      chatId: 'chat_1',
+      claimToken: 'ct_1',
+      challengeId: '',
+      mobileNumber: '+14155551234',
+      firstName: '',
+      isNewUser: true,
+      requiredFields: [{ name: 'em_address', type: 'email', message: 'Email address' }],
+      sentAt: new Date().toISOString(),
+    });
+    mockGetProfileOnboarding.mockResolvedValue({ name: 'Mark', city: 'NYC', dietary: null });
+    mockRegisterResyUser.mockResolvedValue('resy_tok_registered');
+
+    await handler(makeSQSEvent('mark@example.com'), dummyContext, () => {});
+
+    expect(mockRegisterResyUser).toHaveBeenCalledWith(
+      'ct_1',
+      '+14155551234',
+      'Mark',
+      '',
+      'mark@example.com',
+    );
+  });
+
+  it('no house account and no credentials auto-starts Resy OTP onboarding', async () => {
     mockLoadUserContext.mockResolvedValue(null);
     mockGetUser.mockResolvedValue(null);
+    mockSendResyOTP.mockResolvedValueOnce('sms');
 
     await handler(makeSQSEvent('find me a restaurant'), dummyContext, () => {});
 
-    expect(mockSendResyOTP).not.toHaveBeenCalled();
-    expect(mockSetPendingOTP).not.toHaveBeenCalled();
+    expect(mockCreateUser).toHaveBeenCalledWith('+14155551234');
+    expect(mockSendResyOTP).toHaveBeenCalledWith('+14155551234');
+    expect(mockSetPendingOTP).toHaveBeenCalledWith('+14155551234', 'chat_1');
     expect(mockAddMessage).not.toHaveBeenCalled();
-    expect(mockSendMessage).toHaveBeenCalledWith(
-      'chat_1',
-      "hey, i'm having trouble connecting to our reservation system right now. sit tight — i'll sort it out.",
-    );
+  });
+
+  it('auto-onboarding falls back gracefully when Resy rate-limits OTP', async () => {
+    mockLoadUserContext.mockResolvedValue(null);
+    mockGetUser.mockResolvedValue(null);
+    mockSendResyOTP.mockResolvedValueOnce('rate_limited');
+
+    await handler(makeSQSEvent('find me a restaurant'), dummyContext, () => {});
+
+    expect(mockSetPendingOTP).not.toHaveBeenCalled();
+    expect(mockSendMessage).toHaveBeenCalled();
   });
 
   it('house account user reaches Claude with isHouseAccount true and skips payment verify', async () => {

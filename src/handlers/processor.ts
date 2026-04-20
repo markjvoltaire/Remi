@@ -19,9 +19,11 @@ import { getUserProfile, setUserName, addMessage } from '../state/conversation.j
 import {
   getUser, createUser, loadUserContext, consumeJustOnboarded,
   setPendingOTP, getPendingOTP, clearPendingOTP,
+  getPendingCloudBrowserOtp, clearPendingCloudBrowserOtp,
   setPendingChallenge, getPendingChallenge, clearPendingChallenge,
   setCredentials, clearSignedOut,
   afterResyCredentialsLinked,
+  getProfileOnboarding,
 } from '../auth/index.js';
 import {
   sendResyOTP,
@@ -34,6 +36,7 @@ import {
 } from '../bookings/index.js';
 import { resyLinkMessages } from '../auth/resyLinkMessages.js';
 import { redactPhone } from '../utils/redact.js';
+import { ingestOtpCode } from '../cloudBrowser/index.js';
 import { getItem, putItem } from '../db/storage.js';
 
 const CONTACT_CARD_INTERVAL = 5;
@@ -157,12 +160,14 @@ async function processRecord(record: SQSRecord): Promise<void> {
         const email = emailMatch[0].toLowerCase();
         console.log(`[processor] No-challenge user, trying with email: ${email}`);
 
-        // Try registerResyUser (hits multiple endpoints with logging)
+        const onboardingProfile = await getProfileOnboarding(from);
+        const firstName = onboardingProfile?.name ?? '';
+
         const authToken = await registerResyUser(
           pendingChallenge.claimToken,
           pendingChallenge.mobileNumber,
-          '',  // first_name — let Resy use existing
-          '',  // last_name — let Resy use existing
+          firstName,
+          '',
           email,
         );
 
@@ -239,6 +244,18 @@ async function processRecord(record: SQSRecord): Promise<void> {
     return;
   }
 
+  // ── Cloud-browser OTP: forward to live cloud-browser login if waiting ──
+  const pendingCbOtp = await getPendingCloudBrowserOtp(from);
+  if (pendingCbOtp) {
+    const stripped = text.trim().replace(/[\s\-\.]/g, '');
+    if (/^\d{4,6}$/.test(stripped)) {
+      console.log(`[processor] Routing OTP to cloud-browser login for ${redactPhone(from)} session=${pendingCbOtp.sessionId}`);
+      ingestOtpCode(from, stripped);
+      await clearPendingCloudBrowserOtp(from);
+      return;
+    }
+  }
+
   // ── OTP code check ──────────────────────────────────────────────────
   const pendingOtp = await getPendingOTP(from);
   if (pendingOtp) {
@@ -282,6 +299,16 @@ async function processRecord(record: SQSRecord): Promise<void> {
 
       const challenge = result.challenge;
       await clearPendingOTP(from);
+
+      if (challenge.isNewUser) {
+        // No account with our reservation partner — direct them to signup, do NOT set pending challenge
+        await sendMessage(chatId, resyLinkMessages.noResyAccountFirst);
+        await new Promise(resolve => setTimeout(resolve, 800));
+        await sendMessage(chatId, resyLinkMessages.noResyAccountSecond);
+        console.log(`[processor] OTP accepted, new-user branch — routed to signup for ${redactPhone(from)}`);
+        return;
+      }
+
       await setPendingChallenge(from, {
         chatId,
         claimToken: challenge.claimToken,
@@ -292,11 +319,7 @@ async function processRecord(record: SQSRecord): Promise<void> {
         requiredFields: challenge.requiredFields,
       });
 
-      if (challenge.isNewUser) {
-        await sendMessage(chatId, resyLinkMessages.emailAskNew);
-      } else {
-        await sendMessage(chatId, resyLinkMessages.emailAskExisting(challenge.firstName));
-      }
+      await sendMessage(chatId, resyLinkMessages.emailAskExisting(challenge.firstName));
       return;
     }
     await sendMessage(chatId, resyLinkMessages.otpWaiting);
@@ -308,10 +331,29 @@ async function processRecord(record: SQSRecord): Promise<void> {
   if (!userCtx) {
     if (!(await getUser(from))) {
       await createUser(from);
-      console.log(`[processor] New user (no house account available): ${redactPhone(from)}`);
+      console.log(`[processor] New user — starting Resy OTP onboarding: ${redactPhone(from)}`);
+    } else {
+      console.log(`[processor] Returning user without credentials — starting Resy OTP: ${redactPhone(from)}`);
     }
-    await sendMessage(chatId, `hey, i'm having trouble connecting to our reservation system right now. sit tight — i'll sort it out.`);
-    console.log(`[processor] No Resy credentials and no house account for ${redactPhone(from)}`);
+
+    const otpResult = await sendResyOTP(from);
+    if (otpResult === 'sms') {
+      await setPendingOTP(from, chatId);
+      await sendMessage(chatId, resyLinkMessages.otpSentFirst);
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await sendMessage(chatId, resyLinkMessages.otpSentSecond);
+      console.log(`[processor] OTP sent to ${redactPhone(from)} (auto-onboarding)`);
+    } else if (otpResult === 'rate_limited') {
+      await sendMessage(chatId, resyLinkMessages.rateLimitedFirst);
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await sendMessage(chatId, resyLinkMessages.rateLimitedSecond);
+      console.log(`[processor] OTP rate-limited for ${redactPhone(from)}`);
+    } else {
+      await sendMessage(chatId, resyLinkMessages.otpSendFailedFirst);
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await sendMessage(chatId, resyLinkMessages.otpSendFailedSecond);
+      console.log(`[processor] OTP send failed for ${redactPhone(from)}`);
+    }
     return;
   }
 

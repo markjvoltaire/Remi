@@ -123,6 +123,36 @@ export async function clearPendingOTP(phoneNumber: string): Promise<void> {
   await deleteItem(USER_PK(phoneNumber), 'PENDING_OTP');
 }
 
+// ── Pending Cloud-Browser OTP (code routes to live cloud-browser login) ──
+
+interface PendingCloudBrowserOtpRecord {
+  sessionId: string;
+  createdAt: string;
+}
+
+/**
+ * Marks that the next numeric code the user texts should be forwarded to a live
+ * cloud-browser login, not to Resy's own verifyResyOTP flow. Short TTL because
+ * the bridge inside runPaymentHandoff times out after ~90s anyway.
+ */
+export async function setPendingCloudBrowserOtp(phoneNumber: string, sessionId: string): Promise<void> {
+  await putItem(USER_PK(phoneNumber), 'PENDING_CB_OTP', {
+    sessionId,
+    createdAt: new Date().toISOString(),
+  }, 5 * 60);
+  console.log(`[auth] Cloud-browser OTP pending for ${redactPhone(phoneNumber)} session=${sessionId}`);
+}
+
+export async function getPendingCloudBrowserOtp(phoneNumber: string): Promise<{ sessionId: string; createdAt: Date } | null> {
+  const record = await getItem<PendingCloudBrowserOtpRecord>(USER_PK(phoneNumber), 'PENDING_CB_OTP');
+  if (!record) return null;
+  return { sessionId: record.sessionId, createdAt: new Date(record.createdAt) };
+}
+
+export async function clearPendingCloudBrowserOtp(phoneNumber: string): Promise<void> {
+  await deleteItem(USER_PK(phoneNumber), 'PENDING_CB_OTP');
+}
+
 // ── Pending Challenge (email verification after OTP) ─────────────────────
 
 interface PendingChallenge {
