@@ -8,6 +8,7 @@ type StorageSk =
   | 'PROFILE_ONBOARDING'
   | 'PENDING_OTP'
   | 'PENDING_CHALLENGE'
+  | 'PENDING_CB_OTP'
   | 'AUTHTOKEN'
   | 'CONV'
   | 'USERPROFILE'
@@ -21,6 +22,7 @@ const EXPIRY_COLUMNS: Record<StorageSk, string | null> = {
   PROFILE_ONBOARDING: null,
   PENDING_OTP: 'expires_at',
   PENDING_CHALLENGE: 'expires_at',
+  PENDING_CB_OTP: 'expires_at',
   AUTHTOKEN: 'expires_at',
   CONV: 'expires_at',
   USERPROFILE: null,
@@ -207,6 +209,22 @@ export async function getItem<T>(pk: string, sk: string): Promise<T | null> {
         } as T;
       }
 
+      case 'PENDING_CB_OTP': {
+        const { data, error } = await client
+          .from('agent_pending_cloud_browser_otp')
+          .select('session_id,created_at,expires_at')
+          .eq('phone_number', phoneNumber)
+          .single();
+        if (error && error.code === 'PGRST116') return null;
+        if (error) throw error;
+        if (!data) return null;
+        if (isExpired(data.expires_at, now)) return null;
+        return {
+          sessionId: data.session_id,
+          createdAt: normalizeIso(data.created_at),
+        } as T;
+      }
+
       default:
         throw new Error(`[storage] Unsupported user SK: ${sk}`);
     }
@@ -360,6 +378,12 @@ export async function putItem(
         await upsert('agent_pending_challenges', row, 'phone_number');
         return;
       }
+      case 'PENDING_CB_OTP': {
+        const row = mapKeysToSnake({ ...data, phoneNumber });
+        if (ttlExpiresAt) row.expires_at = ttlExpiresAt;
+        await upsert('agent_pending_cloud_browser_otp', row, 'phone_number');
+        return;
+      }
       default:
         throw new Error(`[storage] Unsupported user SK for putItem: ${sk}`);
     }
@@ -432,6 +456,9 @@ export async function deleteItem(pk: string, sk: string): Promise<void> {
         return;
       case 'PENDING_CHALLENGE':
         await client.from('agent_pending_challenges').delete().eq('phone_number', phoneNumber);
+        return;
+      case 'PENDING_CB_OTP':
+        await client.from('agent_pending_cloud_browser_otp').delete().eq('phone_number', phoneNumber);
         return;
       case 'PROFILE':
         await client.from('agent_users').delete().eq('phone_number', phoneNumber);
@@ -507,7 +534,7 @@ export async function queryByPk<T>(pk: string): Promise<T[]> {
   if (parsed.entity === 'user') {
     const phoneNumber = parsed.id;
     // Match the DynamoDB single-table design: multiple SK records can share the same PK.
-    const mapping: Array<StorageSk> = ['PROFILE', 'CREDENTIALS', 'SIGNED_OUT', 'JUST_ONBOARDED', 'PROFILE_ONBOARDING', 'PENDING_OTP', 'PENDING_CHALLENGE'];
+    const mapping: Array<StorageSk> = ['PROFILE', 'CREDENTIALS', 'SIGNED_OUT', 'JUST_ONBOARDED', 'PROFILE_ONBOARDING', 'PENDING_OTP', 'PENDING_CHALLENGE', 'PENDING_CB_OTP'];
     for (const sk of mapping) {
       const v = await getItem<Record<string, unknown>>(pk, sk);
       if (v) items.push({ PK: `USER#${phoneNumber}`, SK: sk, ...(v as Record<string, unknown>) } as unknown as T);
