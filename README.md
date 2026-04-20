@@ -157,5 +157,3 @@ Also supports Railway, Fly.io, and Heroku (`Procfile` included).
 - [Resy](https://resy.com) — Restaurant reservation platform to book
 
 ## License
-
-MIT
