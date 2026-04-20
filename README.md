@@ -159,5 +159,3 @@ Also supports Railway, Fly.io, and Heroku (`Procfile` included).
 ## License
 
 MIT
-
-hello
