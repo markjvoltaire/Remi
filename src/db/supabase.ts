@@ -8,6 +8,7 @@ type StorageSk =
   | 'PROFILE_ONBOARDING'
   | 'PENDING_OTP'
   | 'PENDING_CHALLENGE'
+  | 'PENDING_BOOK'
   | 'AUTHTOKEN'
   | 'CONV'
   | 'USERPROFILE'
@@ -21,6 +22,7 @@ const EXPIRY_COLUMNS: Record<StorageSk, string | null> = {
   PROFILE_ONBOARDING: null,
   PENDING_OTP: 'expires_at',
   PENDING_CHALLENGE: 'expires_at',
+  PENDING_BOOK: 'expires_at',
   AUTHTOKEN: 'expires_at',
   CONV: 'expires_at',
   USERPROFILE: null,
@@ -66,12 +68,13 @@ function isExpired(expiresAt: unknown, now = new Date()): boolean {
   return dt.getTime() <= now.getTime();
 }
 
-function entityFromPk(pk: string): { entity: 'user' | 'authToken' | 'conversation' | 'userProfile' | 'chatCount'; id: string } {
+function entityFromPk(pk: string): { entity: 'user' | 'authToken' | 'conversation' | 'userProfile' | 'chatCount' | 'pendingBooking'; id: string } {
   if (pk.startsWith('USER#')) return { entity: 'user', id: pk.slice('USER#'.length) };
   if (pk.startsWith('AUTHTOKEN#')) return { entity: 'authToken', id: pk.slice('AUTHTOKEN#'.length) };
   if (pk.startsWith('CONV#')) return { entity: 'conversation', id: pk.slice('CONV#'.length) };
   if (pk.startsWith('USERPROFILE#')) return { entity: 'userProfile', id: pk.slice('USERPROFILE#'.length) };
   if (pk.startsWith('CHATCOUNT#')) return { entity: 'chatCount', id: pk.slice('CHATCOUNT#'.length) };
+  if (pk.startsWith('PENDING_BOOK#')) return { entity: 'pendingBooking', id: pk.slice('PENDING_BOOK#'.length) };
   throw new Error(`[storage] Unrecognized PK: ${pk}`);
 }
 
@@ -299,6 +302,37 @@ export async function getItem<T>(pk: string, sk: string): Promise<T | null> {
     return { count: normalizeBigint(data.count) } as T;
   }
 
+  if (parsed.entity === 'pendingBooking') {
+    const chatId = parsed.id;
+    if (itemSk !== 'PENDING_BOOK') throw new Error(`[storage] Unsupported pendingBooking SK: ${sk}`);
+
+    const { data, error } = await client
+      .from('agent_pending_bookings')
+      .select('chat_id,venue_id,venue_name,venue_url,date,party_size,requested_time,booked_time,slot_type,config_token,city,created_at,expires_at')
+      .eq('chat_id', chatId)
+      .single();
+
+    if (error && error.code === 'PGRST116') return null;
+    if (error) throw error;
+    if (!data) return null;
+    if (isExpired(data.expires_at, now)) return null;
+
+    return {
+      venueId: normalizeBigint(data.venue_id),
+      venueName: data.venue_name,
+      venueUrl: data.venue_url ?? undefined,
+      date: data.date,
+      partySize: data.party_size,
+      requestedTime: data.requested_time,
+      bookedTime: data.booked_time,
+      slotType: data.slot_type,
+      configToken: data.config_token,
+      city: data.city ?? undefined,
+      createdAt: normalizeBigint(data.created_at),
+      expiresAt: new Date(data.expires_at).getTime(),
+    } as T;
+  }
+
   throw new Error(`[storage] Unhandled getItem case: pk=${pk} sk=${sk}`);
 }
 
@@ -404,6 +438,32 @@ export async function putItem(
     return;
   }
 
+  if (parsed.entity === 'pendingBooking') {
+    const chatId = parsed.id;
+    if (itemSk !== 'PENDING_BOOK') throw new Error(`[storage] Unsupported pendingBooking SK for putItem: ${sk}`);
+
+    // Map the PendingBooking shape to the SQL columns, converting expiresAt (ms) -> timestamptz.
+    const d = data as Record<string, unknown>;
+    const expiresAtMs = typeof d.expiresAt === 'number' ? d.expiresAt : null;
+    const row: Record<string, unknown> = {
+      chat_id: chatId,
+      venue_id: d.venueId,
+      venue_name: d.venueName,
+      venue_url: d.venueUrl ?? null,
+      date: d.date,
+      party_size: d.partySize,
+      requested_time: d.requestedTime,
+      booked_time: d.bookedTime,
+      slot_type: d.slotType,
+      config_token: d.configToken,
+      city: d.city ?? null,
+      created_at: d.createdAt,
+      expires_at: expiresAtMs ? new Date(expiresAtMs) : (ttlExpiresAt ?? new Date(Date.now() + 15 * 60 * 1000)),
+    };
+    await upsert('agent_pending_bookings', row, 'chat_id');
+    return;
+  }
+
   throw new Error(`[storage] Unhandled putItem case: pk=${pk} sk=${sk}`);
 }
 
@@ -466,6 +526,13 @@ export async function deleteItem(pk: string, sk: string): Promise<void> {
     const token = parsed.id;
     if (itemSk !== 'AUTHTOKEN') throw new Error(`[storage] Unsupported authToken SK for deleteItem: ${sk}`);
     await client.from('agent_auth_tokens').delete().eq('token', token);
+    return;
+  }
+
+  if (parsed.entity === 'pendingBooking') {
+    const chatId = parsed.id;
+    if (itemSk !== 'PENDING_BOOK') throw new Error(`[storage] Unsupported pendingBooking SK for deleteItem: ${sk}`);
+    await client.from('agent_pending_bookings').delete().eq('chat_id', chatId);
     return;
   }
 
