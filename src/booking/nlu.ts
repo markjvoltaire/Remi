@@ -225,7 +225,7 @@ async function extractRestaurantAndAction(
 
   try {
     const response = await client.messages.create({
-      model: 'claude-3-5-haiku-20241022',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 256,
       system,
       tools: [EXTRACT_TOOL],
