@@ -43,6 +43,23 @@ describe('loadUserContext', () => {
     expect(mockUpdateLastActive).toHaveBeenCalledWith('+1111');
   });
 
+  it('prefers stored credentials over RESY_AUTH_TOKEN when both are set', async () => {
+    vi.stubEnv('RESY_AUTH_TOKEN', 'env_tok');
+    const user = { phoneNumber: '+6666', createdAt: new Date(), lastActive: new Date(), onboardingComplete: true };
+    mockGetUser.mockResolvedValue(user);
+    mockGetCredentials.mockResolvedValue({ resyAuthToken: 'stored_tok' });
+    mockIsSignedOut.mockResolvedValue(false);
+    mockUpdateLastActive.mockResolvedValue(undefined);
+
+    const { loadUserContext } = await import('../../auth/userContext.js');
+    const ctx = await loadUserContext('+6666');
+    expect(ctx).not.toBeNull();
+    expect(ctx!.bookingsCredentials.resyAuthToken).toBe('stored_tok');
+    expect(ctx!.isHouseAccount).toBe(false);
+    expect(mockGetCredentials).toHaveBeenCalledWith('+6666');
+    expect(mockUpdateLastActive).toHaveBeenCalledWith('+6666');
+  });
+
   it('returns null when no user and no env token', async () => {
     mockGetUser.mockResolvedValue(null);
     mockIsSignedOut.mockResolvedValue(false);
@@ -50,6 +67,17 @@ describe('loadUserContext', () => {
     const { loadUserContext } = await import('../../auth/userContext.js');
     const ctx = await loadUserContext('+2222');
     expect(ctx).toBeNull();
+  });
+
+  it('returns null when user exists but has no credentials and RESY_AUTH_TOKEN is unset', async () => {
+    const user = { phoneNumber: '+7777', createdAt: new Date(), lastActive: new Date(), onboardingComplete: false };
+    mockGetUser.mockResolvedValue(user);
+    mockGetCredentials.mockResolvedValue(null);
+
+    const { loadUserContext } = await import('../../auth/userContext.js');
+    const ctx = await loadUserContext('+7777');
+    expect(ctx).toBeNull();
+    expect(mockUpdateLastActive).not.toHaveBeenCalled();
   });
 
   it('falls back to RESY_AUTH_TOKEN when set (no extra flag required)', async () => {
@@ -126,5 +154,21 @@ describe('loadUserContext', () => {
     expect(mockCreateUser).toHaveBeenCalledWith('+5555');
     expect(ctx!.bookingsCredentials.resyAuthToken).toBe('env_tok_create');
     expect(ctx!.isHouseAccount).toBe(true);
+  });
+});
+
+describe('isResySharedTokenMode', () => {
+  it('returns false when RESY_AUTH_TOKEN is missing or blank', async () => {
+    vi.stubEnv('RESY_AUTH_TOKEN', '');
+    const { isResySharedTokenMode } = await import('../../auth/userContext.js');
+    expect(isResySharedTokenMode()).toBe(false);
+    vi.stubEnv('RESY_AUTH_TOKEN', '   ');
+    expect(isResySharedTokenMode()).toBe(false);
+  });
+
+  it('returns true when RESY_AUTH_TOKEN is non-empty', async () => {
+    vi.stubEnv('RESY_AUTH_TOKEN', 'house_jwt');
+    const { isResySharedTokenMode } = await import('../../auth/userContext.js');
+    expect(isResySharedTokenMode()).toBe(true);
   });
 });

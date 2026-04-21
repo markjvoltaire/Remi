@@ -1,6 +1,6 @@
 export type { User, BookingsCredentials, AuthToken } from './types.js';
 export { encrypt, decrypt } from './encryption.js';
-export { getUser, createUser, getCredentials, setCredentials, clearCredentials, isSignedOut, clearSignedOut, createAuthToken, verifyAuthToken, markAuthTokenUsed, getAuthTokenChatId, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, setPendingCloudBrowserOtp, getPendingCloudBrowserOtp, clearPendingCloudBrowserOtp, getProfileOnboarding, setProfileOnboarding } from './db.js';
+export { getUser, createUser, getCredentials, setCredentials, clearCredentials, isSignedOut, clearSignedOut, createAuthToken, verifyAuthToken, markAuthTokenUsed, getAuthTokenChatId, consumeJustOnboarded, setPendingOTP, getPendingOTP, clearPendingOTP, setPendingChallenge, getPendingChallenge, clearPendingChallenge, getProfileOnboarding, setProfileOnboarding } from './db.js';
 export {
   generateMagicLink,
   verifyMagicLinkToken,

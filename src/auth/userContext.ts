@@ -22,14 +22,13 @@ export function isResySharedTokenMode(): boolean {
  * Load a user's context (user record + decrypted credentials).
  *
  * Priority:
- * 1. Per-user encrypted credentials (from onboarding)
- * 2. Env-level RESY_AUTH_TOKEN fallback (skip OTP when set — dev/demo only; leave empty in production)
- * 3. null → triggers onboarding flow
+ * 1. Per-user encrypted credentials (from onboarding) — each guest books with their own Resy session
+ * 2. Env-level `RESY_AUTH_TOKEN` when set — fallback for users who have not linked yet (`isHouseAccount: true`)
+ * 3. `null` → triggers onboarding flow
  */
 export async function loadUserContext(phoneNumber: string): Promise<UserContext | null> {
   let user = await getUser(phoneNumber);
 
-  // Per-user credentials take priority
   if (user) {
     const creds = await getCredentials(phoneNumber);
     if (creds) {
@@ -40,7 +39,6 @@ export async function loadUserContext(phoneNumber: string): Promise<UserContext 
 
   const envResyAuthToken = getEnvResyAuthToken();
 
-  // Fallback: house account token — lets unlinked users book immediately
   if (envResyAuthToken && !(await isSignedOut(phoneNumber))) {
     if (!user) {
       user = await createUser(phoneNumber);

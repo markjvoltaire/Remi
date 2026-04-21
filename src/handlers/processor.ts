@@ -19,7 +19,6 @@ import { getUserProfile, setUserName, addMessage } from '../state/conversation.j
 import {
   getUser, createUser, loadUserContext, consumeJustOnboarded,
   setPendingOTP, getPendingOTP, clearPendingOTP,
-  getPendingCloudBrowserOtp, clearPendingCloudBrowserOtp,
   setPendingChallenge, getPendingChallenge, clearPendingChallenge,
   setCredentials, clearSignedOut,
   afterResyCredentialsLinked,
@@ -36,7 +35,6 @@ import {
 } from '../bookings/index.js';
 import { resyLinkMessages } from '../auth/resyLinkMessages.js';
 import { redactPhone } from '../utils/redact.js';
-import { ingestOtpCode } from '../cloudBrowser/index.js';
 import { getItem, putItem } from '../db/storage.js';
 
 const CONTACT_CARD_INTERVAL = 5;
@@ -242,18 +240,6 @@ async function processRecord(record: SQSRecord): Promise<void> {
     }
     await sendMessage(chatId, resyLinkMessages.emailReminder);
     return;
-  }
-
-  // ── Cloud-browser OTP: forward to live cloud-browser login if waiting ──
-  const pendingCbOtp = await getPendingCloudBrowserOtp(from);
-  if (pendingCbOtp) {
-    const stripped = text.trim().replace(/[\s\-\.]/g, '');
-    if (/^\d{4,6}$/.test(stripped)) {
-      console.log(`[processor] Routing OTP to cloud-browser login for ${redactPhone(from)} session=${pendingCbOtp.sessionId}`);
-      ingestOtpCode(from, stripped);
-      await clearPendingCloudBrowserOtp(from);
-      return;
-    }
   }
 
   // ── OTP code check ──────────────────────────────────────────────────

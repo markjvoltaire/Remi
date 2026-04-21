@@ -80,8 +80,6 @@ vi.mock('../../auth/index.js', () => ({
   setPendingChallenge: (...args: unknown[]) => mockSetPendingChallenge(...args),
   getPendingChallenge: (...args: unknown[]) => mockGetPendingChallenge(...args),
   clearPendingChallenge: (...args: unknown[]) => mockClearPendingChallenge(...args),
-  getPendingCloudBrowserOtp: vi.fn().mockResolvedValue(null),
-  clearPendingCloudBrowserOtp: vi.fn().mockResolvedValue(undefined),
   setCredentials: (...args: unknown[]) => mockSetCredentials(...args),
   clearSignedOut: (...args: unknown[]) => mockClearSignedOut(...args),
   afterResyCredentialsLinked: (...args: unknown[]) => mockAfterResyCredentialsLinked(...args),
@@ -108,14 +106,6 @@ vi.mock('../../bookings/index.js', () => ({
   verifyPaymentStatus: (...args: unknown[]) => mockVerifyPaymentStatus(...args),
   recordPaymentSnapshotTransition: (...args: unknown[]) => mockRecordPaymentSnapshotTransition(...args),
   messageSuggestsBookingIntent: (...args: unknown[]) => mockMessageSuggestsBookingIntent(...args),
-}));
-
-vi.mock('../../cloudBrowser/index.js', () => ({
-  ingestOtpCode: vi.fn(),
-  isCloudBrowserReady: vi.fn().mockReturnValue(false),
-  runPaymentHandoff: vi.fn().mockResolvedValue(null),
-  makeLivePaymentHandoffDeps: vi.fn(() => ({})),
-  makeLiveSmsBridge: vi.fn(() => ({})),
 }));
 
 // Mock storage getItem/putItem for chat count

@@ -14,8 +14,6 @@ import {
   setPendingOTP,
   getPendingOTP,
   clearPendingOTP,
-  getPendingCloudBrowserOtp,
-  clearPendingCloudBrowserOtp,
   setPendingChallenge,
   getPendingChallenge,
   clearPendingChallenge,
@@ -35,7 +33,6 @@ import {
   messageSuggestsBookingIntent,
 } from './bookings/index.js';
 import { resyLinkMessages } from './auth/resyLinkMessages.js';
-import { ingestOtpCode } from './cloudBrowser/index.js';
 import { redactPhone } from './utils/redact.js';
 import { putItem } from './db/storage.js';
 
@@ -334,18 +331,6 @@ app.post(
       return;
     }
 
-    // ── Cloud-browser OTP: if a live cloud-browser login is awaiting this code ──
-    const pendingCbOtp = await getPendingCloudBrowserOtp(from);
-    if (pendingCbOtp) {
-      const stripped = text.trim().replace(/[\s\-\.]/g, '');
-      if (/^\d{4,6}$/.test(stripped)) {
-        console.log(`[main] Routing OTP to cloud-browser login for ${redactPhone(from)} session=${pendingCbOtp.sessionId}`);
-        ingestOtpCode(from, stripped);
-        await clearPendingCloudBrowserOtp(from);
-        return;
-      }
-    }
-
     // ── OTP code check: if user is mid-onboarding and sends a code ────────
     const pendingOtp = await getPendingOTP(from);
     if (pendingOtp) {
@@ -432,8 +417,8 @@ app.post(
     }
 
     // ── Auth check ────────────────────────────────────────────────────────
-    // With house account fallback, loadUserContext returns null ONLY when
-    // RESY_AUTH_TOKEN is unset AND the user has no personal credentials.
+    // loadUserContext returns null when there is no per-user JWT and no RESY_AUTH_TOKEN
+    // fallback (or user signed out from house mode).
     const userCtx = await loadUserContext(from);
     if (!userCtx) {
       if (!(await getUser(from))) {
