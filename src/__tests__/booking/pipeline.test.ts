@@ -231,9 +231,14 @@ describe('handleBookingTurn — nearest time delta', () => {
 });
 
 describe('handleBookingTurn — no same-day availability', () => {
-  it('tells the guest the day is fully committed and never drifts to another date', async () => {
+  it('recommends the next available day/time when the requested day is empty', async () => {
     mockSearch.mockResolvedValueOnce([carbone]);
-    mockFindSlots.mockResolvedValueOnce([]);
+    mockFindSlots
+      .mockResolvedValueOnce([]) // requested day
+      .mockResolvedValueOnce([]) // +1
+      .mockResolvedValueOnce([   // +2 has availability
+        { config_token: 'tok-next', date: '2026-04-26', time: '20:00', party_size: 2, type: 'Dining Room' },
+      ]);
 
     const result = await handleBookingTurn({
       chatId: 'chat-1',
@@ -254,7 +259,13 @@ describe('handleBookingTurn — no same-day availability', () => {
     expect(result.booked).toBe(false);
     expect(result.text).toContain('Carbone');
     expect(result.text.toLowerCase()).toContain('fully committed');
-    expect(mockSetPending).not.toHaveBeenCalled();
+    expect(result.text.toLowerCase()).toContain('next availability');
+    expect(mockSetPending).toHaveBeenCalledWith('chat-1', expect.objectContaining({
+      date: '2026-04-26',
+      bookedTime: '20:00',
+      requestedTime: '19:30',
+      configToken: 'tok-next',
+    }));
     expect(mockBookReservation).not.toHaveBeenCalled();
   });
 });

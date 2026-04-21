@@ -24,6 +24,7 @@ import {
 import {
   proposalExactTime,
   proposalWithNearestTime,
+  proposalNextAvailable,
   disambiguation,
   noSameDayAvailability,
   venueNotFound,
@@ -244,8 +245,42 @@ async function handleBookOrModify(input: PipelineInput): Promise<PipelineResult>
   }
 
   if (slots.length === 0) {
-    await clearPendingBooking(chatId);
-    return handled(noSameDayAvailability(venue.name, merged.date!, merged.partySize!));
+    const next = await findNextAvailableSlot({
+      resyAuthToken,
+      venueId: venue.venue_id,
+      startDate: merged.date!,
+      partySize: merged.partySize!,
+      desiredTime: merged.time!,
+      geo: geo ? { lat: geo.lat, lng: geo.lng } : undefined,
+    });
+    if (!next) {
+      await clearPendingBooking(chatId);
+      return handled(noSameDayAvailability(venue.name, merged.date!, merged.partySize!));
+    }
+
+    const proposal = await setPendingBooking(chatId, {
+      venueId: venue.venue_id,
+      venueName: venue.name,
+      venueUrl: venue.url,
+      date: next.date,
+      partySize: merged.partySize!,
+      requestedTime: merged.time!,
+      bookedTime: next.slot.time,
+      slotType: next.slot.type,
+      configToken: next.slot.config_token,
+      city: merged.city ?? venue.location.city,
+    });
+
+    return handled(
+      proposalNextAvailable(
+        venue.name,
+        merged.date!,
+        merged.time!,
+        merged.partySize!,
+        proposal.date,
+        proposal.bookedTime,
+      ),
+    );
   }
 
   // 3. Pick the nearest time on that same date (never drift to another day).
@@ -283,6 +318,42 @@ function handled(text: string): PipelineResult {
 
 function normalizeName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function addDays(yyyyMmDd: string, days: number): string {
+  const [y, m, d] = yyyyMmDd.split('-').map(Number);
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  dt.setDate(dt.getDate() + days);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+async function findNextAvailableSlot(args: {
+  resyAuthToken: string;
+  venueId: number;
+  startDate: string; // YYYY-MM-DD (exclusive)
+  partySize: number;
+  desiredTime: string; // HH:MM
+  geo?: { lat: number; lng: number };
+  lookaheadDays?: number;
+}): Promise<{ date: string; slot: ResyTimeSlot } | null> {
+  const { resyAuthToken, venueId, startDate, partySize, desiredTime, geo, lookaheadDays = 7 } = args;
+  for (let offset = 1; offset <= lookaheadDays; offset++) {
+    const day = addDays(startDate, offset);
+    let slots: ResyTimeSlot[] = [];
+    try {
+      slots = await findSlots(resyAuthToken, venueId, day, partySize, geo);
+    } catch (err) {
+      console.error('[pipeline] findNextAvailableSlot findSlots error:', err instanceof Error ? err.message : err);
+      continue;
+    }
+    if (!slots.length) continue;
+    const nearest = findNearestSameDaySlot(slots, desiredTime);
+    if (nearest) return { date: day, slot: nearest.slot };
+  }
+  return null;
 }
 
 interface MergedIntent {

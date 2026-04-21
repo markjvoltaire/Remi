@@ -56,6 +56,21 @@ export function noSameDayAvailability(
   return `${venueName} is fully committed on ${formatDate(date)} for ${partySize} ${partySize === 1 ? 'guest' : 'guests'}. Want to try a different day?`;
 }
 
+export function proposalNextAvailable(
+  venueName: string,
+  requestedDate: string,
+  requestedTime: string,
+  partySize: number,
+  nextDate: string,
+  nextTime: string,
+): string {
+  return [
+    `${venueName} is fully committed on ${formatDate(requestedDate)}.`,
+    `Next availability near ${formatTime(requestedTime)} is ${formatDate(nextDate)} at ${formatTime(nextTime)} for ${partySize} ${partySize === 1 ? 'guest' : 'guests'}.`,
+    `Shall I lock it in?`,
+  ].join('\n---\n');
+}
+
 export function venueNotFound(query: string): string {
   return `I couldn't find ${query} on Resy. Want me to try a different spelling or a similar spot?`;
 }
