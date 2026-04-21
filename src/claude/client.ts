@@ -1,10 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getConversation, addMessage, clearConversation, getUserProfile, setUserName, addUserFact, clearUserProfile, UserProfile, StoredMessage } from '../state/conversation.js';
-import { searchRestaurants, findSlots, bookReservation, getReservations, cancelReservation, getResyProfile } from '../bookings/index.js';
-import type { ResyBookingConfirmation } from '../bookings/types.js';
+import { getReservations, cancelReservation, getResyProfile } from '../bookings/index.js';
 import type { BookingsCredentials } from '../auth/types.js';
 import { clearCredentials, clearSignedOut as clearSignedOutFlag, isResySharedTokenMode } from '../auth/index.js';
-import { inferResyGeoFromText, threadSnippetForGeo } from '../bookings/geo.js';
+import { extractBookingIntent } from '../booking/nlu.js';
+import { handleBookingTurn } from '../booking/pipeline.js';
 
 const client = new Anthropic();
 
@@ -33,35 +33,14 @@ Vocabulary: prefer "I've found the table and I'm ready to lock it in" over "erro
 - List upcoming reservations and fetch profile details via resy_profile when helpful
 - Give thoughtful recommendations (cuisine, neighborhood, occasion)
 - Use web search when guests want nuance beyond availability (reviews, hours, vibe)
-## Resy booking flow (tools)
-1. resy_search → venue IDs
-2. resy_find_slots → open times for date and party size
-3. resy_book → only after explicit guest confirmation; this creates a REAL reservation
-4. resy_cancel → requires resy_token from resy_reservations
+## Booking flow — you do NOT drive this
+Reservation search, availability checks, proposals, and bookings are handled by a dedicated booking engine — not by you. When a guest asks to book, searches for a restaurant, or confirms a pending proposal, the system intercepts the turn and responds directly. You will not see tool calls for search/slots/book.
 
-When the guest names a city (e.g. Miami, Los Angeles), the search geo should match that market — pass lat/lng in tools or ensure the thread mentions the city so results are not NYC-biased. Use venue_id values exactly from resy_search results; do not invent IDs.
+If a booking-related request slips through to you (no intercept), it means the guest's message was too ambiguous — ask one clarifying question (restaurant, date, or party size — whichever is missing) in a short, warm line. Do not fabricate venue IDs, times, or confirmations.
 
-## Be decisive — minimize back-and-forth
-When a guest gives you enough to act, ACT. Do not ask clarifying questions you can answer yourself.
-- If they say a restaurant name + date + party size → search, find slots, and present the best option in ONE response. Do not ask "which Sunday?" if they said "this Sunday" — compute the date from today.
-- If they say "book it" or "yes" after you've presented a specific option → book immediately. Do not reconfirm details they already gave you.
-- If they change their mind ("instead I need X") → search for X immediately. The LAST restaurant they mentioned is the one they want. Drop everything about the previous one.
-- Only ask a question when information is genuinely missing (e.g. no date, no party size, ambiguous restaurant name with multiple matches).
-- Chain search → find slots in a single turn, then PRESENT the option and WAIT for the guest to confirm before calling resy_book. Never book without the guest saying "yes", "book it", "do it", or similar explicit confirmation.
-- The flow should be: (1) search + find slots in one turn → present best option, (2) guest confirms → book. Two messages, not more.
+Never claim a reservation is booked, held, or set unless the booking engine has said so in the thread. Never write "it's handled", "your table is set", or similar confirmation language unless the guest's prior message shows the booking engine already confirmed.
 
-## Venue accuracy — CRITICAL
-When the guest switches restaurants mid-conversation (e.g. "actually, book Casadonna instead"), you MUST:
-1. Run a NEW resy_search for the new restaurant name
-2. Use the venue_id from THAT new search result
-3. NEVER reuse a venue_id from a previous search for a different restaurant
-Double-check: before calling resy_book or resy_find_slots, verify the venue_id matches the restaurant name the guest MOST RECENTLY requested. If there is any mismatch, search again.
-
-BOOKING INTEGRITY (non-negotiable):
-- NEVER call resy_book until the guest has explicitly confirmed. After finding slots, present the option (restaurant, date, time, party size) and ask "Shall I lock this in?" or similar. Wait for "yes" / "book it" / "do it" before calling resy_book.
-- You must call resy_book and receive a successful tool result before you tell the guest anything is booked, confirmed, or secured — including phrases like "it's handled" or "your table is set." If you have not completed resy_book successfully in this turn, do not imply the reservation exists. Never write "[booked a reservation]" in guest-facing text (internal logging only).
-
-When resy_book returns a confirmation JSON, ALWAYS send venue_url from that result as its own message segment so the guest can tap it. Example structure: short assurance --- essentials (name, date, time, party) --- venue_url on its own line (use --- between segments).
+resy_cancel, resy_reservations, and resy_profile remain yours for existing-reservation management and profile lookup.
 
 If nothing is available, say it gracefully — e.g. that evening is fully committed — without blaming a system.
 
@@ -300,87 +279,8 @@ const WEB_SEARCH_TOOL = {
 } as unknown as Anthropic.Tool;
 
 // ─── Resy Tools ─────────────────────────────────────────────────────────────
-
-const RESY_SEARCH_TOOL: Anthropic.Tool = {
-  name: 'resy_search',
-  description: 'Search for restaurants on Resy. Use when someone asks about finding a place to eat or a restaurant. Returns venue IDs needed for checking availability.',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      query: {
-        type: 'string',
-        description: 'Search keyword (e.g., "italian", "sushi", "steakhouse", "Carbone").',
-      },
-      lat: {
-        type: 'number',
-        description: 'Latitude for location-based search. OMIT only if the guest did not name a city — the system infers Miami, LA, etc. from the thread; otherwise set explicitly when you know the market.',
-      },
-      lng: {
-        type: 'number',
-        description: 'Longitude for location-based search. Pair with lat (same rules).',
-      },
-    },
-    required: ['query'],
-  },
-};
-
-const RESY_FIND_SLOTS_TOOL: Anthropic.Tool = {
-  name: 'resy_find_slots',
-  description: 'Find available time slots at a Resy venue for a given date and party size. Returns config tokens needed for booking.',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      venue_id: {
-        type: 'number',
-        description: 'The Resy venue ID (from resy_search results).',
-      },
-      date: {
-        type: 'string',
-        description: 'Date to check (YYYY-MM-DD format).',
-      },
-      party_size: {
-        type: 'number',
-        description: 'Number of guests.',
-      },
-      lat: {
-        type: 'number',
-        description: 'Latitude for /4/find (should match the city of the venue). Omit if the thread already names the city — the system infers common markets.',
-      },
-      lng: {
-        type: 'number',
-        description: 'Longitude for /4/find; pair with lat.',
-      },
-    },
-    required: ['venue_id', 'date', 'party_size'],
-  },
-};
-
-const RESY_BOOK_TOOL: Anthropic.Tool = {
-  name: 'resy_book',
-  description: 'Book a reservation on Resy. Automatically finds a fresh slot at booking time so tokens dont expire. This makes a REAL reservation — always confirm venue, date, time, and party size with the user before calling this.',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      venue_id: {
-        type: 'number',
-        description: 'The Resy venue ID (from resy_search results).',
-      },
-      date: {
-        type: 'string',
-        description: 'Reservation date (YYYY-MM-DD).',
-      },
-      party_size: {
-        type: 'number',
-        description: 'Number of guests.',
-      },
-      time: {
-        type: 'string',
-        description: 'Desired time in HH:MM 24h format (e.g., "19:00"). Picks the closest available slot.',
-      },
-    },
-    required: ['venue_id', 'date', 'party_size'],
-  },
-};
+// Search / find_slots / book are intentionally NOT exposed to Claude — the
+// deterministic booking pipeline (src/booking/) owns those.
 
 const RESY_CANCEL_TOOL: Anthropic.Tool = {
   name: 'resy_cancel',
@@ -426,106 +326,11 @@ const RESY_SIGN_OUT_TOOL: Anthropic.Tool = {
 
 // Tools that return data Claude needs to reason about (require tool-use loop)
 const DATA_RETRIEVAL_TOOLS = new Set([
-  'resy_search', 'resy_find_slots', 'resy_reservations',
-  'resy_book', 'resy_cancel', 'resy_sign_out', 'resy_profile',
+  'resy_reservations',
+  'resy_cancel', 'resy_sign_out', 'resy_profile',
 ]);
 
 const MAX_TOOL_LOOPS = 5;
-const MAX_CACHED_VENUES = 20;
-
-type VenueSelection = { venue_id: number; name: string };
-const recentVenueOptionsByChat = new Map<string, VenueSelection[]>();
-
-function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-function ordinalToIndex(message: string): number | null {
-  const m = normalizeText(message);
-  const byWord: Record<string, number> = {
-    first: 0,
-    second: 1,
-    third: 2,
-    fourth: 3,
-    fifth: 4,
-  };
-  for (const [word, idx] of Object.entries(byWord)) {
-    if (m.includes(word)) return idx;
-  }
-  const numMatch = m.match(/\b(\d{1,2})(st|nd|rd|th)?\b/);
-  if (!numMatch) return null;
-  const n = Number(numMatch[1]);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n - 1;
-}
-
-/**
- * Pick a venue from the last resy_search cache using the full thread (not just the latest SMS),
- * with Miami vs NYC (etc.) disambiguation when multiple venues share a short name like "Carbone".
- */
-function resolveVenueFromSelection(
-  chatId: string,
-  threadText: string,
-  fallbackVenueId: number,
-): number {
-  const cached = recentVenueOptionsByChat.get(chatId);
-  if (!cached || cached.length === 0) return fallbackVenueId;
-
-  const normalizedMessage = normalizeText(threadText);
-  if (!normalizedMessage) return fallbackVenueId;
-
-  const candidates: VenueSelection[] = [];
-  for (const venue of cached) {
-    const normalizedName = normalizeText(venue.name);
-    if (normalizedName.length >= 3 && normalizedMessage.includes(normalizedName)) {
-      candidates.push(venue);
-    }
-  }
-
-  let pool = candidates;
-  if (pool.length === 0) {
-    const idx = ordinalToIndex(normalizedMessage);
-    if (idx !== null && idx >= 0 && idx < cached.length) {
-      return cached[idx].venue_id;
-    }
-    return fallbackVenueId;
-  }
-
-  const miamiHint = /\b(miami|south beach|brickell|wynwood|collins|coral gables|miami beach|florida)\b/i.test(threadText);
-  const nyHint = /\b(new york|nyc|manhattan|brooklyn|queens|soho|tribeca|west village|ues)\b/i.test(threadText);
-  if (miamiHint) {
-    const narrowed = pool.filter(v => /\bmiami|beach|south|collins|florida\b/i.test(v.name));
-    if (narrowed.length > 0) pool = narrowed;
-  } else if (nyHint) {
-    const narrowed = pool.filter(v => !/\bmiami\b/i.test(v.name));
-    if (narrowed.length > 0) pool = narrowed;
-  }
-
-  pool = [...pool].sort(
-    (a, b) => normalizeText(b.name).length - normalizeText(a.name).length,
-  );
-  return pool[0].venue_id;
-}
-
-/**
- * If we have search results for this chat, refuse to call Resy with an arbitrary venue_id (hallucinated or stale).
- * Falls back to name-based disambiguation within the cached list only.
- */
-function coerceVenueToCachedOnly(chatId: string, threadText: string, venueId: number): number | null {
-  const cached = recentVenueOptionsByChat.get(chatId);
-  if (!cached?.length) return venueId;
-
-  const allowed = new Set(cached.map(v => v.venue_id));
-  if (allowed.has(venueId)) return venueId;
-
-  const resolved = resolveVenueFromSelection(chatId, threadText, venueId);
-  if (allowed.has(resolved)) return resolved;
-
-  console.warn(
-    `[claude] Venue ${venueId} is not in the current Resy search cache (have: ${[...allowed].join(', ')}); need a fresh resy_search for the right city.`,
-  );
-  return null;
-}
 
 export type StandardReactionType = 'love' | 'like' | 'dislike' | 'laugh' | 'emphasize' | 'question';
 export type ReactionType = StandardReactionType | 'custom';
@@ -589,100 +394,7 @@ function formatHistoryForClaude(messages: StoredMessage[], isGroupChat: boolean)
   });
 }
 
-const PENDING_SLOT_CHECK_RE = /\[checked slots: venue (\d+), (\d{4}-\d{2}-\d{2}), party of (\d+)\]/;
-
-function parsePendingSlotCheckFromHistory(messages: StoredMessage[]): { venueId: number; date: string; partySize: number } | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role !== 'assistant') continue;
-    const m = msg.content.match(PENDING_SLOT_CHECK_RE);
-    if (m) {
-      return { venueId: Number(m[1]), date: m[2], partySize: Number(m[3]) };
-    }
-  }
-  return null;
-}
-
-/**
- * Validate and correct a date string (YYYY-MM-DD) against the user's message.
- * If the user said a day name (e.g. "Monday") but Claude computed the wrong date,
- * find the nearest correct date for that day name.
- */
-function correctDateFromMessage(date: string, recentMessages: string[]): string {
-  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const recentText = recentMessages.join(' ').toLowerCase();
-
-  // Find which day name the user mentioned
-  let mentionedDay: number | null = null;
-  for (let i = 0; i < dayNames.length; i++) {
-    if (recentText.includes(dayNames[i])) {
-      mentionedDay = i;
-      break;
-    }
-  }
-
-  // Also check "tomorrow"
-  if (recentText.includes('tomorrow')) {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
-    if (date !== tomorrowStr) {
-      console.log(`[date-fix] User said "tomorrow" but Claude passed ${date}, correcting to ${tomorrowStr}`);
-      return tomorrowStr;
-    }
-    return date;
-  }
-
-  if (mentionedDay === null) return date;
-
-  // Check if Claude's date actually falls on the mentioned day
-  const parsed = new Date(date + 'T12:00:00');
-  if (parsed.getDay() === mentionedDay) return date; // Correct!
-
-  // Wrong day — find the next occurrence of the mentioned day from today
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  for (let offset = 0; offset <= 90; offset++) {
-    const candidate = new Date(today);
-    candidate.setDate(candidate.getDate() + offset);
-    if (candidate.getDay() === mentionedDay) {
-      const corrected = candidate.toISOString().slice(0, 10);
-      console.log(`[date-fix] User said "${dayNames[mentionedDay]}" but Claude passed ${date} (${dayNames[parsed.getDay()]}), correcting to ${corrected}`);
-      return corrected;
-    }
-  }
-
-  return date;
-}
-
-/** Parses common guest times (e.g. "6:00 pm", "18:30") to HH:MM 24h for Resy. */
-function parseGuestTimeToHHMM(message: string): string | null {
-  const t = message.trim().toLowerCase();
-  if (!t) return null;
-
-  const mer = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a|p)\.?m\.?\b/);
-  if (mer) {
-    let h = parseInt(mer[1], 10);
-    const mins = mer[2] ? parseInt(mer[2], 10) : 0;
-    if (!Number.isFinite(h) || !Number.isFinite(mins)) return null;
-    if (mer[3] === 'p' && h < 12) h += 12;
-    if (mer[3] === 'a' && h === 12) h = 0;
-    return `${h.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
-  }
-
-  const twentyFour = t.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
-  if (twentyFour) {
-    return `${twentyFour[1].padStart(2, '0')}:${twentyFour[2]}`;
-  }
-
-  return null;
-}
-
-function buildBookingConfirmationText(c: ResyBookingConfirmation): string {
-  return `It's handled. --- Your table at ${c.venue_name} is set for ${c.date} at ${c.time}, party of ${c.party_size}. --- ${c.venue_url}`;
-}
-
-/** Model sometimes mimics a successful book without calling resy_book — detect confident false claims. */
+/** Detect confident fake-booking claims in Claude's text (booking engine is the source of truth). */
 function textImpliesConfirmedBooking(text: string | null): boolean {
   if (!text) return false;
   const t = text.toLowerCase();
@@ -760,39 +472,56 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
     await addMessage(chatId, 'user', textToSend, chatContext?.senderHandle);
   }
 
+  // ── Deterministic booking pipeline ──────────────────────────────────────
+  // Intercepts booking-related turns (search/propose/confirm). Falls through
+  // to Claude for chit-chat, profile questions, and anything non-booking.
+  if (resyAuthToken && textToSend) {
+    try {
+      const intent = await extractBookingIntent(textToSend, history);
+      const pipelineResult = await handleBookingTurn({
+        chatId,
+        userMessage: textToSend,
+        history,
+        intent,
+        resyAuthToken,
+      });
+      if (pipelineResult.handled) {
+        if (pipelineResult.text) {
+          await addMessage(chatId, 'assistant', pipelineResult.text);
+        }
+        return {
+          text: pipelineResult.text || null,
+          reaction: null,
+          effect: pipelineResult.booked ? { type: 'screen', name: 'celebration' } : null,
+          renameChat: null,
+          rememberedUser: null,
+        };
+      }
+    } catch (err) {
+      console.error('[claude] booking pipeline error, falling back to Claude:', err instanceof Error ? err.message : err);
+    }
+  }
+
   try {
     const formattedHistory = formatHistoryForClaude(history, chatContext?.isGroupChat ?? false);
-    const recentLinesForGeo = history.slice(-20).map(m => m.content);
-    const venueThreadText = threadSnippetForGeo(textToSend.trim(), recentLinesForGeo);
-    const inferredGeo = inferResyGeoFromText(venueThreadText);
 
-    // Build tools list
+    // Build tools list. Search/find_slots/book are owned by the booking pipeline.
     const tools: Anthropic.Tool[] = [
       REACTION_TOOL, EFFECT_TOOL, REMEMBER_USER_TOOL, WEB_SEARCH_TOOL,
     ];
-    if (resyAuthToken) {
-      // All users get search, slots, and booking tools
-      tools.push(RESY_SEARCH_TOOL, RESY_FIND_SLOTS_TOOL, RESY_BOOK_TOOL);
-
-      // Personal account tools only for linked (non-house) users
-      if (!chatContext?.isHouseAccount) {
-        tools.push(
-          RESY_CANCEL_TOOL,
-          RESY_RESERVATIONS_TOOL,
-          RESY_PROFILE_TOOL,
-          RESY_SIGN_OUT_TOOL,
-        );
-      }
+    if (resyAuthToken && !chatContext?.isHouseAccount) {
+      tools.push(
+        RESY_CANCEL_TOOL,
+        RESY_RESERVATIONS_TOOL,
+        RESY_PROFILE_TOOL,
+        RESY_SIGN_OUT_TOOL,
+      );
     }
     if (chatContext?.isGroupChat) {
       tools.push(RENAME_CHAT_TOOL);
     }
 
     // ── Tool-use loop ──────────────────────────────────────────────────────
-    let bookingSucceeded = false; // Track if a resy_book call succeeded
-    const resyBookSummaries: string[] = []; // One entry per resy_book tool call, for accurate history tags
-    /** Resolved venue IDs from resy_find_slots (Claude sometimes passes the wrong id — must match what we actually queried). */
-    const findSlotsSummaries: string[] = [];
     const messages: Anthropic.MessageParam[] = [...formattedHistory, { role: 'user', content: messageContent }];
     let response = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -817,104 +546,7 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
         if (block.type !== 'tool_use') continue;
 
         // ── Resy tool execution ───────────────────────────────────
-        if (block.name === 'resy_search') {
-          const input = block.input as { query: string; lat?: number; lng?: number };
-          try {
-            const geo =
-              input.lat != null && input.lng != null
-                ? { lat: input.lat, lng: input.lng }
-                : inferredGeo
-                  ? { lat: inferredGeo.lat, lng: inferredGeo.lng }
-                  : undefined;
-            const results = await searchRestaurants(resyAuthToken!, input.query, geo);
-            recentVenueOptionsByChat.set(
-              chatId,
-              results.slice(0, MAX_CACHED_VENUES).map(r => ({ venue_id: r.venue_id, name: r.name })),
-            );
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(results) });
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : 'Unknown error';
-            console.error('[claude] resy_search error:', msg);
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error searching restaurants: ${msg}`, is_error: true });
-          }
-
-        } else if (block.name === 'resy_find_slots') {
-          const input = block.input as { venue_id: number; date: string; party_size: number; lat?: number; lng?: number };
-          const recentUserMsgs = history.filter(m => m.role === 'user').slice(-5).map(m => m.content);
-          recentUserMsgs.push(userMessage);
-          input.date = correctDateFromMessage(input.date, recentUserMsgs);
-          const tentativeVenueId = resolveVenueFromSelection(chatId, venueThreadText, input.venue_id);
-          const finalVenueId = coerceVenueToCachedOnly(chatId, venueThreadText, tentativeVenueId);
-          if (finalVenueId === null) {
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content:
-                'Error finding slots: venue_id is not from the last resy_search results. Call resy_search again so venue IDs match the guest’s city (e.g. mention Miami explicitly), then use a venue_id from that response.',
-              is_error: true,
-            });
-            findSlotsSummaries.push('[checked slots: no valid venue — re-run resy_search]');
-          } else {
-            if (finalVenueId !== input.venue_id) {
-              console.log(`[claude] Resolved venue for slots: ${input.venue_id} -> ${finalVenueId} from thread/cache`);
-            }
-            const slotsSummaryLine = `[checked slots: venue ${finalVenueId}, ${input.date}, party of ${input.party_size}]`;
-            try {
-              const explicitGeo = input.lat != null && input.lng != null ? { lat: input.lat, lng: input.lng } : undefined;
-              const geo =
-                explicitGeo ?? (inferredGeo ? { lat: inferredGeo.lat, lng: inferredGeo.lng } : undefined);
-              const slots = await findSlots(resyAuthToken!, finalVenueId, input.date, input.party_size, geo);
-              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(slots) });
-            } catch (error) {
-              const msg = error instanceof Error ? error.message : 'Unknown error';
-              console.error('[claude] resy_find_slots error:', msg);
-              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error finding slots: ${msg}`, is_error: true });
-            }
-            findSlotsSummaries.push(slotsSummaryLine);
-          }
-
-        } else if (block.name === 'resy_book') {
-          const input = block.input as { venue_id: number; date: string; party_size: number; time?: string };
-          const recentUserMsgsBook = history.filter(m => m.role === 'user').slice(-5).map(m => m.content);
-          recentUserMsgsBook.push(userMessage);
-          input.date = correctDateFromMessage(input.date, recentUserMsgsBook);
-          try {
-            const tentativeVenueId = resolveVenueFromSelection(chatId, venueThreadText, input.venue_id);
-            const finalVenueId = coerceVenueToCachedOnly(chatId, venueThreadText, tentativeVenueId);
-            if (finalVenueId === null) {
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: block.id,
-                content:
-                  'Error booking: venue_id is not from the last resy_search. Run resy_search for the correct city, then resy_book with an id from those results.',
-                is_error: true,
-              });
-              resyBookSummaries.push('[resy_book did not succeed]');
-            } else {
-              if (finalVenueId !== input.venue_id) {
-                console.log(`[claude] Resolved venue for booking: ${input.venue_id} -> ${finalVenueId} from thread/cache`);
-              }
-              const bookGeo = inferredGeo ? { lat: inferredGeo.lat, lng: inferredGeo.lng } : undefined;
-              const confirmation = await bookReservation(
-                resyAuthToken!,
-                finalVenueId,
-                input.date,
-                input.party_size,
-                input.time,
-                bookGeo,
-              );
-              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(confirmation) });
-              bookingSucceeded = true;
-              resyBookSummaries.push('[booked a reservation]');
-            }
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : 'Unknown error';
-            console.error('[claude] resy_book error:', msg);
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error booking reservation: ${msg}`, is_error: true });
-            resyBookSummaries.push('[resy_book did not succeed]');
-          }
-
-        } else if (block.name === 'resy_cancel') {
+        if (block.name === 'resy_cancel') {
           const input = block.input as { resy_token: string };
           try {
             const result = await cancelReservation(resyAuthToken!, input.resy_token);
@@ -1039,68 +671,19 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
       textResponse = textResponse.replace(/\[(?:checked slots|searched resy|booked a reservation|resy_book|cancelled a reservation|checked upcoming reservations|checked resy profile|signed out of resy)[^\]]*\]\s*/g, '').trim() || null;
     }
 
-    // If the model skipped resy_book but the guest clearly picked a time after we showed slots, book deterministically.
-    if (resyAuthToken && !bookingSucceeded && resyBookSummaries.length === 0) {
-      const conv = await getConversation(chatId);
-      const convLines = conv.slice(-25).map(m => m.content);
-      const progThreadText = threadSnippetForGeo(userMessage.trim(), convLines);
-      const pending = parsePendingSlotCheckFromHistory(conv);
-      const timeHHMM = parseGuestTimeToHHMM(userMessage.trim());
-      if (pending && timeHHMM) {
-        const coercedVenue = coerceVenueToCachedOnly(chatId, progThreadText, pending.venueId);
-        if (coercedVenue === null) {
-          console.warn('[claude] Programmatic resy_book skipped: venue not in last search cache');
-        } else {
-          try {
-            const progGeo = inferResyGeoFromText(progThreadText);
-            const geoArg = progGeo ? { lat: progGeo.lat, lng: progGeo.lng } : undefined;
-            const confirmation = await bookReservation(
-              resyAuthToken,
-              coercedVenue,
-              pending.date,
-              pending.partySize,
-              timeHHMM,
-              geoArg,
-            );
-            textResponse = buildBookingConfirmationText(confirmation);
-            bookingSucceeded = true;
-            resyBookSummaries.push('[booked a reservation]');
-            console.log('[claude] Programmatic resy_book fallback succeeded');
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.error('[claude] Programmatic resy_book fallback failed:', msg);
-          }
-        }
-      }
-    }
-
-    if (!bookingSucceeded && textImpliesConfirmedBooking(textResponse)) {
-      console.warn('[claude] Replaced model text that claimed a booking without a successful resy_book');
+    // Belt-and-suspenders: Claude should never claim a booking on this code path
+    // (the pipeline owns booking). If it does, replace with a gentle reset.
+    if (textImpliesConfirmedBooking(textResponse)) {
+      console.warn('[claude] Replaced model text that claimed a booking on the non-pipeline path');
       textResponse =
-        "couldn't lock that reservation on the partner side just now — want to try that time again, or pick another?";
-    }
-
-    // After tool loop + programmatic fallback (bookingSucceeded may have flipped)
-    if (bookingSucceeded && !effect) {
-      effect = { type: 'screen', name: 'celebration' };
-      console.log('[claude] Auto-attaching celebration effect for successful booking');
+        "let me pull that up properly — what restaurant, date, and time were you thinking?";
     }
 
     // Build a summary of tool calls for conversation history
-    // This lets Claude reference prior searches, bookings, etc. in follow-up messages
     const toolSummaryParts: string[] = [];
-    let resyBookSummaryIdx = 0;
-    let findSlotsSummaryIdx = 0;
     for (const block of allBlocks) {
       if (block.type !== 'tool_use') continue;
-      if (block.name === 'resy_search') {
-        const input = block.input as { query: string };
-        toolSummaryParts.push(`[searched resy for "${input.query}"]`);
-      } else if (block.name === 'resy_find_slots') {
-        toolSummaryParts.push(findSlotsSummaries[findSlotsSummaryIdx++] ?? '[checked slots]');
-      } else if (block.name === 'resy_book') {
-        toolSummaryParts.push(resyBookSummaries[resyBookSummaryIdx++] ?? '[resy_book]');
-      } else if (block.name === 'resy_cancel') {
+      if (block.name === 'resy_cancel') {
         toolSummaryParts.push(`[cancelled a reservation]`);
       } else if (block.name === 'resy_reservations') {
         toolSummaryParts.push(`[checked upcoming reservations]`);
@@ -1109,9 +692,6 @@ export async function chat(chatId: string, userMessage: string, images: ImageInp
       } else if (block.name === 'resy_sign_out') {
         toolSummaryParts.push(`[signed out of resy]`);
       }
-    }
-    while (resyBookSummaryIdx < resyBookSummaries.length) {
-      toolSummaryParts.push(resyBookSummaries[resyBookSummaryIdx++]);
     }
 
     // Add assistant response to history (include tool context so Claude remembers what it did)

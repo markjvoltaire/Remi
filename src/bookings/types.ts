@@ -30,6 +30,8 @@ export interface ResyBookingConfirmation {
   time: string;
   party_size: number;
   type: string;
+  /** The time the guest originally asked for (HH:MM), when distinct from `time`. */
+  requested_time?: string;
 }
 
 export interface ResyReservation {

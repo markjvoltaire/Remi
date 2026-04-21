@@ -178,43 +178,46 @@ export async function findSlots(
 }
 
 /**
- * Book a reservation. Composite: find fresh slot → details → user → book.
- *
- * Takes venue_id + desired time instead of a config_token, because config tokens
- * expire within minutes. We re-fetch a fresh slot at booking time to avoid stale tokens.
+ * Pick the available slot on `day` whose time is nearest to `desiredHHMM`.
+ * Returns null when there are no slots for the day. Never drifts to another date.
  */
-export async function bookReservation(
-  authToken: string,
-  venueId: number,
-  day: string,
-  partySize: number,
-  desiredTime?: string, // HH:MM — picks closest slot if provided
-  geo?: { lat: number; lng: number }
-): Promise<ResyBookingConfirmation> {
-  console.log(`[resy] Booking: venue ${venueId}, ${day}, party of ${partySize}, desired time: ${desiredTime || 'any'}`);
-
-  // Step 0: Get a fresh config token by searching for current slots
-  const freshSlots = await findSlots(authToken, venueId, day, partySize, geo);
-  if (freshSlots.length === 0) {
-    throw new Error('No available slots for this venue/date/party size. The restaurant may be fully booked.');
+export function findNearestSameDaySlot(
+  slots: ResyTimeSlot[],
+  desiredHHMM: string,
+): { slot: ResyTimeSlot; deltaMinutes: number } | null {
+  if (!slots.length) return null;
+  const desiredMins = timeToMinutes(desiredHHMM);
+  let best: ResyTimeSlot | null = null;
+  let bestDiff = Number.POSITIVE_INFINITY;
+  for (const slot of slots) {
+    const diff = Math.abs(timeToMinutes(slot.time) - desiredMins);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = slot;
+    }
   }
+  if (!best) return null;
+  return { slot: best, deltaMinutes: bestDiff };
+}
 
-  // Pick the best matching slot
-  let configToken: string;
-  if (desiredTime) {
-    // Find the closest time match
-    const match = freshSlots.find(s => s.time === desiredTime)
-      || freshSlots.reduce((best, slot) => {
-          const bestDiff = Math.abs(timeToMinutes(best.time) - timeToMinutes(desiredTime));
-          const slotDiff = Math.abs(timeToMinutes(slot.time) - timeToMinutes(desiredTime));
-          return slotDiff < bestDiff ? slot : best;
-        });
-    configToken = match.config_token;
-    console.log(`[resy] Matched slot at ${match.time} (requested ${desiredTime})`);
-  } else {
-    configToken = freshSlots[0].config_token;
-    console.log(`[resy] Using first available slot at ${freshSlots[0].time}`);
-  }
+export interface BookReservationArgs {
+  authToken: string;
+  venueId: number;
+  day: string;              // YYYY-MM-DD
+  partySize: number;
+  configToken: string;      // config_token for the specific slot the caller chose
+  bookedTime: string;       // HH:MM of the chosen slot (for logging/telemetry)
+  requestedTime?: string;   // HH:MM the guest asked for; surfaced in confirmation if different
+}
+
+/**
+ * Book a reservation against a specific config_token that the caller has already chosen.
+ * This function will NOT change the date or shift to a different slot — that is the
+ * caller's responsibility (see findNearestSameDaySlot).
+ */
+export async function bookReservation(args: BookReservationArgs): Promise<ResyBookingConfirmation> {
+  const { authToken, venueId, day, partySize, configToken, bookedTime, requestedTime } = args;
+  console.log(`[resy] Booking: venue ${venueId}, ${day}, party of ${partySize}, time ${bookedTime}`);
 
   // Step 1: Get booking details (book_token)
   const detailsParams = new URLSearchParams({
@@ -291,9 +294,10 @@ export async function bookReservation(
     venue_name: venueName,
     venue_url: venueUrl,
     date: day,
-    time: timeSlot || day,
+    time: timeSlot || bookedTime,
     party_size: numSeats,
     type: slotType,
+    requested_time: requestedTime && requestedTime !== bookedTime ? requestedTime : undefined,
   };
 }
 
